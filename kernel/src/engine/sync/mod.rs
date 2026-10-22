@@ -34,11 +34,13 @@ use crate::{FileMeta, KernelError, KernelResult, PredicateRef, SchemaRef};
 
 pub(crate) mod json;
 mod parquet;
-mod prefix_sum;
 mod storage;
 
 #[cfg(feature = "declarative-plans")]
 mod aggs;
+
+#[cfg(feature = "declarative-plans")]
+mod prefix_sum;
 
 #[cfg(feature = "declarative-plans")]
 pub mod plan;
