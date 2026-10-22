@@ -197,11 +197,14 @@ impl LogSegment {
         if let Some(newest_commit) = self.newest_commit().filter(|_| !bounded) {
             return self.replay_for_pm_from_newest_commit(executor, newest_commit);
         }
-        resolve_pm_batches(self.read_pm_batches_via_plan(
+        let candidate = resolve_pm_batches(self.read_pm_batches_via_plan(
             executor,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             None,
-        )?)
+        )?)?;
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        candidate.ensure_pointer_at_or_before(self.end_version)?;
+        Ok(candidate)
     }
 
     /// Replays P&M by first reading the newest commit in its own plan, then at most one more plan

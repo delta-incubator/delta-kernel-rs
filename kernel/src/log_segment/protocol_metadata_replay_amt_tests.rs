@@ -631,16 +631,7 @@ async fn plan_replay_bounded_by_crc_or_checkpoint_runs_one_plan(
         ReplayBound::Crc => {
             put_crc_with_pointer(&store, 1, LastManifestCommit::new(0, 0).unwrap()).await
         }
-        ReplayBound::Checkpoint => {
-            let checkpoint_rows = standalone_pm_commit(one_column_schema());
-            add_checkpoint_to_store(
-                &store,
-                parse_json_batch(StringArray::from_iter_values(checkpoint_rows.lines())),
-                &format!("{:020}.checkpoint.parquet", 1),
-            )
-            .await
-            .unwrap();
-        }
+        ReplayBound::Checkpoint => put_pm_checkpoint(&store, 1).await,
     }
     let compaction = compacted_log_path_for_versions(2, 3, "json");
     if compacted {
@@ -780,14 +771,7 @@ async fn check_pointed_action_above_segment_checkpoint<E: Engine>(
         commit_info(Some((2, 1))),
     ])
     .await;
-    let checkpoint_rows = standalone_pm_commit(one_column_schema());
-    add_checkpoint_to_store(
-        &store,
-        parse_json_batch(StringArray::from_iter_values(checkpoint_rows.lines())),
-        &format!("{:020}.checkpoint.parquet", 1),
-    )
-    .await
-    .unwrap();
+    put_pm_checkpoint(&store, 1).await;
 
     let engine = make_engine(store);
     let storage = engine.storage_handler();
@@ -842,14 +826,7 @@ async fn check_standalone_checkpoint_above_pointed_commit<E: Engine>(
 ) {
     let pointer = commit_info(Some((0, 0)));
     let (store, table_root) = manifest_commit_table(&[pointer.clone(), pointer]).await;
-    let checkpoint_rows = standalone_pm_commit(one_column_schema());
-    add_checkpoint_to_store(
-        &store,
-        parse_json_batch(StringArray::from_iter_values(checkpoint_rows.lines())),
-        &format!("{:020}.checkpoint.parquet", 1),
-    )
-    .await
-    .unwrap();
+    put_pm_checkpoint(&store, 1).await;
 
     let engine = make_engine(store);
     let storage = engine.storage_handler();
@@ -1070,14 +1047,7 @@ async fn latest_checkpoint_action_fails_without_commit_or_crc_at_checkpoint_vers
     add_commit(table_root.as_str(), store.as_ref(), 0, commit)
         .await
         .unwrap();
-    let pm = standalone_pm_commit(one_column_schema());
-    add_checkpoint_to_store(
-        &store,
-        parse_json_batch(pm.lines().collect::<Vec<_>>().into()),
-        "00000000000000000001.checkpoint.parquet",
-    )
-    .await
-    .unwrap();
+    put_pm_checkpoint(&store, 1).await;
 
     let engine = non_plan_engine(store);
     let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
@@ -1272,22 +1242,30 @@ async fn assert_replay_last_manifest_commit<E: Engine>(
 }
 
 // A `lastManifestCommit` naming a version after the commit that carries it is invalid, so replay
-// fails instead of storing a pointer that later reads would trust.
+// fails instead of storing a pointer that later reads would trust, whether or not a checkpoint file
+// bounds the replay.
+#[rstest]
 #[tokio::test]
-async fn replay_rejects_pointer_after_newest_commit() {
-    check_pointer_after_newest_commit(non_plan_engine).await;
+async fn replay_rejects_pointer_after_newest_commit(#[values(false, true)] checkpointed: bool) {
+    check_pointer_after_newest_commit(checkpointed, non_plan_engine).await;
     #[cfg(feature = "declarative-plans")]
-    check_pointer_after_newest_commit(|store| SyncEngine::new_with_store(store)).await;
+    check_pointer_after_newest_commit(checkpointed, |store| SyncEngine::new_with_store(store))
+        .await;
 }
 
 async fn check_pointer_after_newest_commit<E: Engine>(
+    checkpointed: bool,
     make_engine: impl FnOnce(Arc<InMemory>) -> E,
 ) {
-    let (store, table_root) = manifest_commit_table(&[commit_info(Some((5, 5)))]).await;
+    let later_commits = [commit_info(Some((0, 0))), commit_info(Some((5, 5)))];
+    let (store, table_root) = manifest_commit_table(&later_commits).await;
+    if checkpointed {
+        put_pm_checkpoint(&store, 1).await;
+    }
     let engine = make_engine(store);
     assert_result_error_with_message(
         Snapshot::builder_for(table_root).build(&engine),
-        "lastManifestCommit version 5 exceeds commit version 1",
+        "lastManifestCommit version 5 exceeds commit version 2",
     );
 }
 
@@ -1511,17 +1489,8 @@ async fn post_commit_snapshot_takes_last_manifest_commit_from_the_transaction() 
 async fn snapshot_on_checkpoint_reads_last_manifest_commit_from_commit_file(
     #[case] delete_commit_file: bool,
 ) {
-    // Kernel refuses to write a classic checkpoint on an adaptiveMetadata table, so the checkpoint
-    // carrying v0's P&M is written by hand.
     let (store, table_root) = manifest_commit_table(&[]).await;
-    let checkpoint_rows = standalone_pm_commit(one_column_schema());
-    add_checkpoint_to_store(
-        &store,
-        parse_json_batch(StringArray::from_iter_values(checkpoint_rows.lines())),
-        &format!("{:020}.checkpoint.parquet", 0),
-    )
-    .await
-    .unwrap();
+    put_pm_checkpoint(&store, 0).await;
     let engine = SyncEngine::new_with_store(store.clone());
     if delete_commit_file {
         store
@@ -1541,6 +1510,19 @@ async fn snapshot_on_checkpoint_reads_last_manifest_commit_from_commit_file(
             Some(LastManifestCommit::new(0, 0).unwrap())
         );
     }
+}
+
+// Writes a parquet checkpoint at `version` holding only top-level protocol and metaData. Kernel
+// refuses to write a classic checkpoint on an adaptiveMetadata table, so it is written by hand.
+async fn put_pm_checkpoint(store: &Arc<InMemory>, version: u64) {
+    let rows = standalone_pm_commit(one_column_schema());
+    add_checkpoint_to_store(
+        store,
+        parse_json_batch(StringArray::from_iter_values(rows.lines())),
+        &format!("{version:020}.checkpoint.parquet"),
+    )
+    .await
+    .unwrap();
 }
 
 // Writes a CRC at `version` carrying `pointer` as its `lastManifestCommit`.
