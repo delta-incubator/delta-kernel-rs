@@ -231,6 +231,15 @@ impl CheckpointShape {
         }
     }
 
+    /// Whether the actual checkpoint leaf or sidecar schema contains JSON statistics.
+    /// Returns None when the leaf schema was not retained. A present field wins even when a
+    /// particular row is NULL; callers must not synthesize a per-row fallback in that case.
+    pub(crate) fn has_json_stats(&self) -> Option<bool> {
+        self.leaf_checkpoint_schema
+            .as_ref()
+            .map(|schema| schema.contains_col(["add", "stats"]))
+    }
+
     /// Returns `stats_schema` when the checkpoint has compatible parsed stats.
     pub(crate) fn compatible_stats_parsed_schema<'a>(
         &self,
@@ -368,97 +377,99 @@ mod tests {
         }
     }
 
-    /// Resolves checkpoint shape and, when requested, parsed-stats availability across fixtures.
     #[rstest]
-    #[case::no_checkpoint("app-txn-no-checkpoint", CheckpointType::None, None)]
-    #[case::no_checkpoint_with_stats("app-txn-no-checkpoint", CheckpointType::None, Some(false))]
-    #[case::leaf_parquet("with_checkpoint_no_last_checkpoint", CheckpointType::Leaf, None)]
+    #[case::no_checkpoint("app-txn-no-checkpoint", CheckpointType::None, false, false)]
+    #[case::leaf_parquet(
+        "with_checkpoint_no_last_checkpoint",
+        CheckpointType::Leaf,
+        false,
+        true
+    )]
     #[case::manifest_parquet(
         "v2-checkpoints-parquet-with-sidecars",
         CheckpointType::Manifest,
-        Some(false)
+        false,
+        true
     )]
-    #[case::manifest_json("v2-checkpoints-json-with-sidecars", CheckpointType::Manifest, None)]
+    #[case::manifest_json(
+        "v2-checkpoints-json-with-sidecars",
+        CheckpointType::Manifest,
+        false,
+        true
+    )]
     #[case::leaf_json_inline(
         "v2-checkpoints-json-without-sidecars",
         CheckpointType::Leaf,
-        Some(false)
+        false,
+        true
     )]
-    // Regression: an all-null `sidecar` column is still a leaf.
+    // An all-null sidecar column is still a leaf.
     #[case::leaf_parquet_inline(
         "v2-checkpoints-parquet-without-sidecars",
         CheckpointType::Leaf,
-        None
+        false,
+        true
     )]
-    #[case::leaf_multipart("v1-multi-part-struct-stats-only", CheckpointType::Leaf, Some(true))]
+    #[case::leaf_multipart("v1-multi-part-struct-stats-only", CheckpointType::Leaf, true, false)]
     #[case::json_stats_classic(
         "v2-classic-checkpoint-parquet",
         CheckpointType::Manifest,
-        Some(false)
+        false,
+        true
     )]
     #[case::struct_stats_leaf(
         "v2-classic-parquet-struct-stats-only",
         CheckpointType::Leaf,
-        Some(true)
+        true,
+        false
     )]
     #[case::struct_stats_json_manifest(
         "v2-json-sidecars-struct-stats-only",
         CheckpointType::Manifest,
-        Some(true)
+        true,
+        false
     )]
     #[case::struct_stats_parquet_manifest(
         "v2-parquet-sidecars-struct-stats-only",
         CheckpointType::Manifest,
-        Some(true)
+        true,
+        false
     )]
     fn resolve_checkpoint_and_stats(
         #[case] table: &str,
         #[case] expected_checkpoint: CheckpointType,
-        #[case] expect_parsed: Option<bool>,
+        #[case] expect_parsed: bool,
+        #[case] expect_json: bool,
+        #[values(false, true)] needs_leaf_schema: bool,
     ) {
         let (_engine, snapshot, _tempdir) = load_test_table(table).unwrap();
         let exec = CountingExecutor::new();
-        let stats_schema = expect_parsed.map(|_| probe_stats_schema());
-
-        let shape = if stats_schema.is_some() {
+        let stats_schema = probe_stats_schema();
+        let shape = if needs_leaf_schema {
             CheckpointShape::try_new_with_leaf_schema(&exec, snapshot.as_ref())
         } else {
             CheckpointShape::try_new(&exec, snapshot.as_ref())
         }
         .unwrap();
-        let parsed_stats_schema = stats_schema
-            .as_ref()
-            .and_then(|stats_schema| shape.compatible_stats_parsed_schema(stats_schema));
-
         assert_eq!(
             shape.checkpoint_type, expected_checkpoint,
             "{table}: checkpoint type"
         );
-
-        match expect_parsed {
-            // Stats not requested: no parsed-stats schema regardless of the checkpoint.
-            None => assert!(
-                parsed_stats_schema.is_none(),
-                "{table}: stats not requested"
-            ),
-            // Requested with compatible parsed stats: the requested schema is echoed back.
-            Some(true) => assert_eq!(
-                parsed_stats_schema,
-                stats_schema.as_ref(),
-                "{table}: parsed stats available, schema echoed"
-            ),
-            // Requested but no compatible parsed stats: `None`.
-            Some(false) => assert!(
-                parsed_stats_schema.is_none(),
-                "{table}: no compatible stats"
-            ),
-        }
-
-        let needs_leaf_schema = stats_schema.is_some();
+        assert_eq!(
+            shape.compatible_stats_parsed_schema(&stats_schema),
+            (needs_leaf_schema && expect_parsed).then_some(&stats_schema),
+            "{table}: parsed stats schema",
+        );
+        let has_leaf_schema = needs_leaf_schema && expected_checkpoint != CheckpointType::None;
         assert_eq!(
             shape.leaf_checkpoint_schema.is_some(),
-            needs_leaf_schema && expected_checkpoint != CheckpointType::None,
+            has_leaf_schema,
             "{table}: checkpoint leaf schema"
+        );
+        assert_eq!(
+            shape.has_json_stats(),
+            has_leaf_schema.then_some(expect_json),
+            "{table}: JSON stats are selected from the leaf or sidecar schema"
         );
         if let Some(schema) = &shape.leaf_checkpoint_schema {
             assert!(schema.contains("add"), "{table}: retained add action");

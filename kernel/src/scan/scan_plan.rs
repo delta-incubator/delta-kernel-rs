@@ -16,19 +16,160 @@ use crate::actions::{
 };
 use crate::checkpoint::{CheckpointShape, CheckpointType};
 use crate::expressions::{
-    col, column_name, joined_column_expr, lit, ColumnName, Expression as Expr, ExpressionRef,
-    MapToStructOptions, Predicate,
+    col, column_name, joined_column_expr, lit, null_lit, ColumnName, Expression as Expr,
+    ExpressionRef, MapToStructOptions, Predicate, UnaryExpressionOp,
 };
 use crate::plans::ir::nodes::{DynamicScan, FileType, ScanFile};
 use crate::plans::ir::plan::Plan;
 use crate::scan::log_replay::{PARTITION_VALUES_PARSED_NAME, STATS_PARSED_NAME};
 use crate::schema::{
-    lazy_schema_ref, schema, schema_ref, DataType, SchemaRef, SchemaStructPatchBuilder, StructField,
+    lazy_schema_ref, schema, schema_ref, CheckpointFieldKind, DataType, SchemaRef,
+    SchemaStructPatchBuilder, StructField, StructType,
 };
 use crate::struct_patch::{project_struct_preserving_nulls, ProjectionStructPatchBuilder};
 use crate::transforms::{transform_output_type, ExpressionTransform};
 use crate::utils::FoldWithOption as _;
 use crate::{KernelError, KernelResult, PlanBuilder};
+
+// Preserve the complete native stats shape for JSON output, while retaining the physical
+// date/timestamp reinterpretations that a typed checkpoint read would otherwise perform.
+// Unannotated integer fields must be read as temporal values before JSON serialization.
+fn checkpoint_json_stats_schema(native: &StructType, requested: &StructType) -> StructType {
+    StructType::new_unchecked(native.fields().map(|field| {
+        let mut field = field.clone();
+        if let Some(target) = requested.field(field.name()) {
+            match (field.data_type(), target.data_type()) {
+                (DataType::Struct(source), DataType::Struct(target)) => {
+                    field.data_type = checkpoint_json_stats_schema(source, target).into();
+                }
+                (DataType::Primitive(source), DataType::Primitive(target))
+                    if source.is_checkpoint_cast_compatible(target, CheckpointFieldKind::Stats) =>
+                {
+                    field.data_type = target.clone().into();
+                }
+                _ => {}
+            }
+        }
+        field
+    }))
+}
+
+// Variant and geospatial min/max require Delta-specific JSON encodings (Z85 and WKT), which
+// generic ToJson does not supply. nullCount for these columns is an ordinary LONG statistic.
+fn stats_need_alternate_json(stats: &StructType, table: &StructType) -> bool {
+    fn contains_special_type(native: &StructType, table: Option<&StructType>) -> bool {
+        native.fields().any(|field| {
+            let table_type = table
+                .and_then(|s| s.field(field.name()))
+                .map(StructField::data_type);
+            match (field.data_type(), table_type) {
+                (DataType::Variant(_), _) | (DataType::Struct(_), Some(DataType::Variant(_))) => {
+                    true
+                }
+                #[cfg(feature = "geo-type-in-dev")]
+                (
+                    DataType::Primitive(
+                        crate::schema::PrimitiveType::Geometry(_)
+                        | crate::schema::PrimitiveType::Geography(_),
+                    ),
+                    _,
+                )
+                | (
+                    DataType::Primitive(crate::schema::PrimitiveType::Binary),
+                    Some(DataType::Primitive(
+                        crate::schema::PrimitiveType::Geometry(_)
+                        | crate::schema::PrimitiveType::Geography(_),
+                    )),
+                ) => true,
+                (DataType::Struct(native), table_type) => contains_special_type(
+                    native,
+                    match table_type {
+                        Some(DataType::Struct(table)) => Some(table),
+                        _ => None,
+                    },
+                ),
+                _ => false,
+            }
+        })
+    }
+    ["minValues", "maxValues"].iter().any(|name| {
+        stats
+            .field(name)
+            .is_some_and(|field| match field.data_type() {
+                DataType::Struct(values) => contains_special_type(values, Some(table)),
+                _ => false,
+            })
+    })
+}
+
+fn checkpoint_json_stats_source(
+    shape: &CheckpointShape,
+    table: &StructType,
+) -> KernelResult<Option<SchemaRef>> {
+    if shape.has_json_stats() == Some(true) {
+        return Ok(None);
+    }
+    let Some(leaf) = shape.leaf_checkpoint_schema.as_ref() else {
+        return Ok(None);
+    };
+    let Ok(field) = leaf.field_at(&column_name!("add.stats_parsed")) else {
+        return Ok(None);
+    };
+    let DataType::Struct(stats) = field.data_type() else {
+        return Ok(None);
+    };
+    if stats_need_alternate_json(stats, table) {
+        return Err(KernelError::unsupported(
+            "Cannot synthesize JSON stats for VARIANT or geospatial min/max; use structured stats or a \
+             checkpoint with JSON stats",
+        ));
+    }
+    // JSON_ONLY has no typed output schema. Resolve temporal types from the full table, including
+    // columns outside the requested/indexed set, while preserving the native field set.
+    let stats_types = schema! {
+        nullable "minValues": (table.clone()),
+        nullable "maxValues": (table.clone()),
+    };
+    Ok(Some(Arc::new(checkpoint_json_stats_schema(
+        stats,
+        &stats_types,
+    ))))
+}
+
+// Align compatible checkpoint fields with the requested types. The read schema includes missing
+// fields so Parquet can null-fill them; the JSON projection keeps only the native field set.
+// ALL's synthesized JSON may use these widened types; JSON_ONLY retains the native types.
+// Variant is atomic here: its physical struct must not be expanded as a user-defined struct.
+fn merge_checkpoint_stats_schema(
+    native: &StructType,
+    requested: &StructType,
+    include_missing: bool,
+) -> StructType {
+    let mut fields: Vec<_> = native
+        .fields()
+        .cloned()
+        .map(|mut field| {
+            if let Some(target) = requested.field(field.name()) {
+                field.data_type = match (field.data_type(), target.data_type()) {
+                    (DataType::Struct(source), DataType::Struct(target)) => {
+                        merge_checkpoint_stats_schema(source, target, include_missing).into()
+                    }
+                    (_, target) => target.clone(),
+                };
+            }
+            field
+        })
+        .collect();
+    if include_missing {
+        fields.extend(
+            requested
+                .fields()
+                .filter(|f| native.field(f.name()).is_none())
+                .cloned(),
+        );
+    }
+    StructType::new_unchecked(fields)
+}
 
 // === Internal column names ===
 
@@ -37,6 +178,7 @@ use crate::{KernelError, KernelResult, PlanBuilder};
 // aggregate and anti-join operators.
 const FILE_ACTION_KEY: &str = "file_action_key";
 const STATS: &str = "stats";
+const JSON_STATS_SOURCE: &str = "_json_stats_source";
 const PARTITION_VALUES: &str = "partitionValues";
 const PARTITION_VALUES_PARSED: &str = "partitionValues_parsed";
 // Generated partition pruning predicates reference this to retain removes.
@@ -62,6 +204,15 @@ impl Scan {
         if state.physical_predicate == PhysicalPredicate::StaticSkipAll {
             return Ok(None);
         }
+
+        let source_json_stats = if self.stats.synthesize_json {
+            checkpoint_json_stats_source(
+                shape,
+                &self.snapshot.table_configuration().physical_schema(),
+            )?
+        } else {
+            None
+        };
 
         let prune = stats_skipping_predicate(state);
         let prune = prune.as_ref();
@@ -102,7 +253,7 @@ impl Scan {
         })?;
 
         let checkpoint_adds = self
-            .checkpoint_arm(shape)?
+            .checkpoint_arm(shape, source_json_stats.as_ref())?
             .try_fold_with(prune, |p, prune| p.filter(prune.clone()))?;
 
         let checkpoint_live_adds = checkpoint_adds
@@ -111,6 +262,18 @@ impl Scan {
                 [column_name!(FILE_ACTION_KEY)],
                 [column_name!(FILE_ACTION_KEY)],
             )?
+            .try_fold_with(source_json_stats.as_ref(), |plan, _| {
+                plan.project_patch(|patch| {
+                    patch
+                        .replace_at(
+                            [ADD_NAME],
+                            STATS,
+                            StructField::nullable(STATS, DataType::STRING),
+                            Expr::unary(UnaryExpressionOp::ToJson, col!(JSON_STATS_SOURCE)),
+                        )
+                        .drop(JSON_STATS_SOURCE)
+                })
+            })?
             .project(output_expr.clone(), output_schema.clone())?;
 
         let commit_live_adds = deduped_commit
@@ -138,20 +301,48 @@ impl Scan {
     /// When the checkpoint lacks native parsed metadata, `FROM_JSON(add.stats, physical_stats)`
     /// and `MAP_TO_STRUCT(add.partitionValues, physical_partitions)` replace the corresponding
     /// fields above. A parsed field is omitted when its schema is absent.
-    fn checkpoint_arm(&self, shape: &CheckpointShape) -> KernelResult<PlanBuilder> {
+    fn checkpoint_arm(
+        &self,
+        shape: &CheckpointShape,
+        source_json_stats: Option<&SchemaRef>,
+    ) -> KernelResult<PlanBuilder> {
         let log_segment = self.snapshot.log_segment();
         let physical_stats = self.state_info.physical_stats_read_schema();
         let physical_partitions = self.state_info.physical_partition_schema.as_ref();
         let source_physical_stats =
             physical_stats.and_then(|schema| shape.compatible_stats_parsed_schema(schema));
+        // JSON output must retain every stat stored in the checkpoint, even when pruning or
+        // structured output requests only a subset of columns.
+        let combined_stats =
+            source_json_stats
+                .as_ref()
+                .zip(source_physical_stats)
+                .map(|(native, requested)| {
+                    Arc::new(merge_checkpoint_stats_schema(native, requested, true))
+                });
+        let stats_to_read = combined_stats
+            .as_ref()
+            .or(source_json_stats)
+            .or(source_physical_stats);
         let source_physical_partitions = physical_partitions
             .and_then(|schema| shape.compatible_partition_values_parsed_schema(schema));
         let checkpoint = log_segment.checkpoint_version_tagged_scan_files()?;
+        let read_schema = || -> KernelResult<SchemaRef> {
+            let schema = parquet_read_schema(stats_to_read, source_physical_partitions)?;
+            if shape.has_json_stats() == Some(false) {
+                Ok(Arc::new(
+                    SchemaStructPatchBuilder::new()
+                        .drop_at([ADD_NAME], STATS)
+                        .build(&schema)?,
+                ))
+            } else {
+                Ok(schema)
+            }
+        };
 
         let actions = match (&shape.checkpoint_type, checkpoint) {
             (CheckpointType::Leaf, Some((FileType::Parquet, parts))) => {
-                let schema =
-                    parquet_read_schema(source_physical_stats, source_physical_partitions)?;
+                let schema = read_schema()?;
                 PlanBuilder::scan_parquet(parts, &[VERSION], schema)
             }
             (CheckpointType::Leaf, Some((FileType::Json, parts))) => {
@@ -162,8 +353,7 @@ impl Scan {
                 )
             }
             (CheckpointType::Manifest, Some((file_type, parts))) => {
-                let schema =
-                    parquet_read_schema(source_physical_stats, source_physical_partitions)?;
+                let schema = read_schema()?;
                 match log_segment.checkpoint_hint_version_tagged_sidecar_scan_files()? {
                     Some(sidecars) => PlanBuilder::scan_parquet(sidecars, &[VERSION], schema),
                     // Without a complete hint, load the sidecars referenced by the manifest.
@@ -175,21 +365,79 @@ impl Scan {
             }
         }?;
 
-        actions
-            .filter(col!("add.path").is_not_null())?
-            .project_patch(|patch| {
-                patch
-                    .with_parsed_add_stats(physical_stats)
-                    .with_parsed_add_partition_values(physical_partitions)
-                    .append(
-                        StructField::not_null(IS_ADD, DataType::BOOLEAN),
-                        Expr::from(col!("add.path").is_not_null()),
-                    )
-                    .append(
-                        FILE_ACTION_KEY_FIELD.clone(),
-                        file_action_key_expr(|col| joined_column_expr!("add", col)),
-                    )
-            })
+        let actions = actions.filter(col!("add.path").is_not_null())?;
+        // Keep the normalized add schema stable without reading a missing Parquet field.
+        let actions = if shape.has_json_stats() == Some(false) {
+            actions.project_patch(|patch| {
+                patch.insert_after_at(
+                    [ADD_NAME],
+                    "dataChange",
+                    StructField::nullable(STATS, DataType::STRING),
+                    null_lit(DataType::STRING),
+                )
+            })?
+        } else {
+            actions
+        };
+        let actions = if let Some(native_json_schema) = source_json_stats {
+            let json_schema = combined_stats
+                .as_ref()
+                .map(|read| {
+                    Arc::new(merge_checkpoint_stats_schema(
+                        native_json_schema,
+                        read,
+                        false,
+                    ))
+                })
+                .unwrap_or_else(|| native_json_schema.clone());
+            let json_source = if combined_stats.is_some() {
+                project_struct_preserving_nulls([ADD_NAME, STATS_PARSED], &json_schema)
+            } else {
+                col!("add.stats_parsed")
+            };
+            // Materialize the native-shaped struct with its schema before ToJson. Keep the typed
+            // output independent: ToJson intentionally truncates timestamp stats to milliseconds.
+            actions.project_patch(|patch| {
+                let patch = patch.append(
+                    StructField::nullable(JSON_STATS_SOURCE, json_schema.as_ref().clone()),
+                    json_source,
+                );
+                match physical_stats {
+                    Some(schema) => {
+                        let typed_stats = if source_physical_stats.is_some() {
+                            project_struct_preserving_nulls([ADD_NAME, STATS_PARSED], schema)
+                        } else {
+                            // An incompatible native struct cannot safely supply typed stats.
+                            // Retain the existing JSON fallback, without synthesizing it first.
+                            Expr::parse_json(col!("add.stats"), Arc::clone(schema))
+                        };
+                        patch.replace_at(
+                            [ADD_NAME],
+                            STATS_PARSED,
+                            StructField::nullable(STATS_PARSED, schema.as_ref().clone()),
+                            typed_stats,
+                        )
+                    }
+                    None => patch.drop_at([ADD_NAME], STATS_PARSED),
+                }
+            })?
+        } else {
+            actions
+        };
+
+        actions.project_patch(|patch| {
+            patch
+                .with_parsed_add_stats(physical_stats)
+                .with_parsed_add_partition_values(physical_partitions)
+                .append(
+                    StructField::not_null(IS_ADD, DataType::BOOLEAN),
+                    Expr::from(col!("add.path").is_not_null()),
+                )
+                .append(
+                    FILE_ACTION_KEY_FIELD.clone(),
+                    file_action_key_expr(|col| joined_column_expr!("add", col)),
+                )
+        })
     }
 
     /// Build the normalized commit JSON arm.
@@ -561,19 +809,24 @@ mod execution_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arrow::array::{StringArray, StructArray};
+    use crate::arrow::array::{
+        Array as _, AsArray as _, Date32Array, Float64Array, Int64Array, StringArray, StructArray,
+        TimestampMicrosecondArray,
+    };
     use crate::engine::arrow_data::EngineDataArrowExt as _;
+    use crate::engine::arrow_utils::parse_json_impl;
     use crate::engine::sync::SyncEngine;
     use crate::log_segment::LogSegment;
     use crate::log_segment_files::LogSegmentFiles;
     use crate::object_store::memory::InMemory;
     use crate::object_store::path::Path;
     use crate::object_store::ObjectStoreExt as _;
+    use crate::parquet::arrow::arrow_writer::ArrowWriter;
     use crate::plans::ir::nodes::Operator;
     use crate::plans::Operation as PlanOperation;
     use crate::scan::{PartitionValuesOptions, StatsOptions};
-    use crate::schema::StructType;
     use crate::snapshot::Snapshot;
+    use crate::table_features::TableFeature;
     use crate::unit_test_utils::{
         create_log_path, MockProtocolBuilder, MockTableConfigurationBuilder,
     };
@@ -977,6 +1230,292 @@ mod tests {
             .downcast_ref::<StringArray>()
             .expect("path string");
         assert_eq!(paths.value(0), "b.parquet");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::native_variant(schema! {
+        nullable "minValues": { nullable "removed": (DataType::unshredded_variant()) },
+    }, true)]
+    #[case::physical_variant(schema! {
+        nullable "minValues": { nullable "v": { nullable "metadata": BINARY, nullable "value": BINARY } },
+    }, true)]
+    #[case::nested_physical_variant(schema! {
+        nullable "maxValues": { nullable "col-outer": {
+            nullable "col-variant": { nullable "metadata": BINARY, nullable "value": BINARY },
+        } },
+    }, true)]
+    #[case::null_count_only(schema! { nullable "nullCount": { nullable "v": LONG } }, false)]
+    #[case::encoded_string(schema! { nullable "minValues": { nullable "v": STRING } }, false)]
+    #[cfg_attr(feature = "geo-type-in-dev", case::native_geometry(schema! {
+        nullable "minValues": { nullable "removed": (crate::schema::GeometryType::try_new("EPSG:4326").unwrap()) },
+    }, true))]
+    #[cfg_attr(feature = "geo-type-in-dev", case::physical_geometry(schema! {
+        nullable "minValues": { nullable "g": BINARY },
+    }, true))]
+    #[cfg_attr(feature = "geo-type-in-dev", case::nested_physical_geometry(schema! {
+        nullable "maxValues": { nullable "col-outer": { nullable "col-geometry": BINARY } },
+    }, true))]
+    #[cfg_attr(feature = "geo-type-in-dev", case::geometry_null_count(schema! {
+        nullable "nullCount": { nullable "g": LONG },
+    }, false))]
+    #[cfg_attr(feature = "geo-type-in-dev", case::encoded_wkt(schema! {
+        nullable "minValues": { nullable "g": STRING },
+    }, false))]
+    fn checkpoint_alternate_json_encoding_policy(
+        #[case] stats: StructType,
+        #[case] needs_encoding: bool,
+        #[values(false, true)] has_json: bool,
+    ) -> KernelResult<()> {
+        let table = schema! {
+            nullable "v": (DataType::unshredded_variant()),
+            nullable "col-outer": { nullable "col-variant": (DataType::unshredded_variant()) },
+        };
+        #[cfg(feature = "geo-type-in-dev")]
+        let table = SchemaStructPatchBuilder::new()
+            .append(StructField::nullable(
+                "g",
+                crate::schema::GeometryType::try_new("EPSG:4326")?,
+            ))
+            .append_at(
+                ["col-outer"],
+                StructField::nullable(
+                    "col-geometry",
+                    crate::schema::GeometryType::try_new("EPSG:4326")?,
+                ),
+            )
+            .build(&table)?;
+        let mut shape = shape(CheckpointType::Leaf, Some(Arc::new(stats)));
+        if !has_json {
+            shape.leaf_checkpoint_schema = Some(Arc::new(
+                SchemaStructPatchBuilder::new()
+                    .drop_at([ADD_NAME], STATS)
+                    .build(shape.leaf_checkpoint_schema.as_ref().unwrap())?,
+            ));
+        }
+        let result = checkpoint_json_stats_source(&shape, &table);
+        if needs_encoding && !has_json {
+            assert!(matches!(result, Err(KernelError::Unsupported(_))));
+        } else {
+            assert_eq!(result?.is_some(), !has_json && !needs_encoding);
+        }
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn metadata_plan_preserves_native_typed_stats(
+        #[values(StatsOptions::json_only(), StatsOptions::all())] stats: StatsOptions,
+        #[values(1, -1)] indexed_columns: i32,
+        #[values(1_000_001, -1)] micros: i64,
+        #[values(false, true)] has_json: bool,
+    ) -> KernelResult<()> {
+        const RAW_STATS: &str = r#" { "numRecords" : 999, "custom" : 42 } "#;
+
+        let values = schema! {
+            nullable "ts": LONG,
+            nullable "d": INTEGER,
+            nullable "ntz": LONG,
+            nullable "nested": { nullable "f": FLOAT, nullable "i": INTEGER },
+        };
+        let native = schema_ref! {
+            nullable "numRecords": LONG,
+            nullable "minValues": (values.clone()),
+            nullable "maxValues": (values),
+            nullable "extra": LONG,
+        };
+        let checkpoint_schema = parquet_read_schema(Some(&native), None)?;
+        let checkpoint_schema = if has_json {
+            checkpoint_schema
+        } else {
+            Arc::new(
+                SchemaStructPatchBuilder::new()
+                    .drop_at([ADD_NAME], STATS)
+                    .build(&checkpoint_schema)?,
+            )
+        };
+        let checkpoint_shape = CheckpointShape {
+            checkpoint_type: CheckpointType::Leaf,
+            leaf_checkpoint_schema: Some(checkpoint_schema.clone()),
+        };
+        let values = serde_json::json!({
+            "d": 1, "ts": micros, "ntz": micros, "nested": { "i": 7, "f": 0.1 }
+        });
+        let mut null_nested = values.clone();
+        null_nested["nested"] = serde_json::Value::Null;
+        let json: Vec<_> = [
+            (
+                "values.parquet",
+                serde_json::json!({
+                    "numRecords": 1, "extra": 42, "minValues": values, "maxValues": values
+                }),
+            ),
+            (
+                "null-nested.parquet",
+                serde_json::json!({
+                    "numRecords": 1, "extra": 42, "minValues": null_nested, "maxValues": null
+                }),
+            ),
+            ("null-stats.parquet", serde_json::Value::Null),
+        ]
+        .into_iter()
+        .map(|(path, stats)| {
+            serde_json::json!({
+                "add": {
+                    "path": path, "size": 1, "modificationTime": 1, "dataChange": true,
+                    "partitionValues": {}, "stats_parsed": stats,
+                    "stats": (path == "values.parquet").then_some(RAW_STATS)
+                }
+            })
+            .to_string()
+        })
+        .collect();
+        let batch = parse_json_impl(&StringArray::from(json), checkpoint_schema)?;
+        let mut bytes = vec![];
+        let mut writer = ArrowWriter::try_new(&mut bytes, batch.schema(), None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+        let store = Arc::new(InMemory::new());
+        futures::executor::block_on(store.put(
+            &Path::from("_delta_log/00000000000000000000.checkpoint.parquet"),
+            bytes.into(),
+        ))?;
+        let segment = log_segment(
+            Url::parse("memory:///_delta_log/").unwrap(),
+            &[],
+            Some("memory:///_delta_log/00000000000000000000.checkpoint.parquet"),
+        );
+        let config = MockTableConfigurationBuilder::new()
+            .with_schema(schema_ref! {
+                nullable "d": DATE,
+                nullable "ts": TIMESTAMP,
+                nullable "ntz": TIMESTAMP_NTZ,
+                nullable "nested": {
+                    nullable "i": LONG, nullable "f": DOUBLE, nullable "missing": STRING,
+                },
+                nullable "missing": STRING,
+            })
+            .with_properties([(
+                "delta.dataSkippingNumIndexedCols",
+                indexed_columns.to_string(),
+            )])
+            .with_protocol(
+                MockProtocolBuilder::new()
+                    .with_features([TableFeature::TimestampWithoutTimezone])
+                    .build(),
+            )
+            .with_table_root("memory:///")
+            .try_build()?;
+        let scan = Arc::new(Snapshot::new(segment, config)?)
+            .scan_builder()
+            .with_stats(stats)
+            .build()?;
+        let plan = scan
+            .build_metadata_scan_plan(&checkpoint_shape)?
+            .expect("non-empty");
+        let engine = SyncEngine::new_with_store(store);
+        let batches = engine
+            .plan_executor()
+            .unwrap()
+            .execute_op(PlanOperation::QueryPlan(plan))?
+            .into_data()?;
+        let mut rows = 0;
+        for batch in batches {
+            let batch = batch?.try_into_record_batch()?;
+            rows += batch.num_rows();
+            let add = batch.column(0).as_struct();
+            let paths = add.column_by_name("path").unwrap().as_string::<i32>();
+            let json = add.column_by_name(STATS).unwrap().as_string::<i32>();
+            for row in 0..batch.num_rows() {
+                let path = paths.value(row);
+                let null_stats = path == "null-stats.parquet";
+                let null_nested = path == "null-nested.parquet";
+                if let Some(stats) = add.column_by_name(STATS_PARSED) {
+                    let stats = stats.as_struct();
+                    assert_eq!(stats.is_null(row), null_stats);
+                    if !null_stats {
+                        assert!(stats.column_by_name("tightBounds").unwrap().is_null(row));
+                        assert!(stats.column_by_name("nullCount").unwrap().is_null(row));
+                        let min = stats.column_by_name("minValues").unwrap().as_struct();
+                        assert!(!min.is_null(row));
+                        let date = min
+                            .column_by_name("d")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Date32Array>()
+                            .unwrap();
+                        assert!(!date.is_null(row));
+                        assert_eq!(date.value(row), 1);
+                        if indexed_columns == -1 {
+                            for name in ["ts", "ntz"] {
+                                let timestamp = min
+                                    .column_by_name(name)
+                                    .unwrap()
+                                    .as_any()
+                                    .downcast_ref::<TimestampMicrosecondArray>()
+                                    .unwrap();
+                                assert!(!timestamp.is_null(row));
+                                assert_eq!(timestamp.value(row), micros, "{name}");
+                            }
+                            assert!(min.column_by_name("missing").unwrap().is_null(row));
+                            let nested = min.column_by_name("nested").unwrap().as_struct();
+                            assert_eq!(nested.is_null(row), null_nested);
+                            if !null_nested {
+                                let integer = nested
+                                    .column_by_name("i")
+                                    .unwrap()
+                                    .as_any()
+                                    .downcast_ref::<Int64Array>()
+                                    .unwrap();
+                                let float = nested
+                                    .column_by_name("f")
+                                    .unwrap()
+                                    .as_any()
+                                    .downcast_ref::<Float64Array>()
+                                    .unwrap();
+                                assert_eq!(integer.value(row), 7);
+                                assert_eq!(float.value(row), f64::from(0.1f32));
+                                assert!(nested.column_by_name("missing").unwrap().is_null(row));
+                            }
+                        }
+                        assert_eq!(
+                            stats.column_by_name("maxValues").unwrap().is_null(row),
+                            null_nested
+                        );
+                    }
+                }
+                if has_json {
+                    // Schema-level selection preserves native JSON verbatim, including NULL even
+                    // when the same row has populated stats_parsed.
+                    assert_eq!(json.is_null(row), path != "values.parquet");
+                    if path == "values.parquet" {
+                        assert_eq!(json.value(row), RAW_STATS);
+                    }
+                    continue;
+                }
+                assert_eq!(json.is_null(row), null_stats);
+                if null_stats {
+                    continue;
+                }
+                let json: serde_json::Value = serde_json::from_str(json.value(row)).unwrap();
+                assert_eq!(json["extra"], 42);
+                assert!(json.get("tightBounds").is_none());
+                assert!(json.get("nullCount").is_none());
+                assert!(json["minValues"].get("missing").is_none());
+                assert_eq!(json["minValues"]["d"], "1970-01-02");
+                let timestamp = if micros > 0 {
+                    "1970-01-01T00:00:01.000"
+                } else {
+                    "1969-12-31T23:59:59.999"
+                };
+                assert_eq!(json["minValues"]["ts"], format!("{timestamp}Z"));
+                assert_eq!(json["minValues"]["ntz"], timestamp);
+                if !null_nested {
+                    assert!(json["minValues"]["nested"].get("missing").is_none());
+                    assert_eq!(json["minValues"]["nested"]["i"], 7);
+                }
+            }
+        }
+        assert_eq!(rows, 3);
         Ok(())
     }
 
