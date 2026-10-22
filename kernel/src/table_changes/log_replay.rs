@@ -126,7 +126,8 @@ pub(crate) fn table_changes_action_iter_with_mode(
 ///       exists in another `add` action _within the same commit_. We store the result in
 ///       `remove_dvs`. Deletion vector resolution affects whether a remove action is selected in
 ///       the second phase, so we must perform it ahead of time in phase 1.
-///     - Ensure that reading is supported on any protocol updates.
+///     - Apply metadata and protocol updates together after reading the entire commit, then
+///       validate support for the mode's read operation.
 ///     - Ensure that the mode's required table feature remains enabled on metadata updates.
 ///     - Ensure that schema updates satisfy the mode's compatibility policy. Change Data Feed mode
 ///       requires equality; row-tracking mode allows additive nullable columns and relaxed
@@ -173,7 +174,8 @@ impl LogReplayScanner {
     /// 1. Check the commits for the presence of a `cdc` action.
     /// 2. Construct a map from path to deletion vector of remove actions that share the same path
     ///    as an add action.
-    /// 3. Perform validation on each protocol and metadata action in the commit.
+    /// 3. Apply metadata and protocol updates together after reading every batch, then validate
+    ///    support for the mode's read operation.
     ///
     /// For more details, see the documentation for [`LogReplayScanner`].
     fn try_new(
@@ -227,12 +229,8 @@ impl LogReplayScanner {
             };
             visitor.visit_rows_of(actions.as_ref())?;
 
-            if metadata_opt.is_none() {
-                metadata_opt = Metadata::try_new_from_data(actions.as_ref())?;
-            }
-            if protocol_opt.is_none() {
-                protocol_opt = Protocol::try_new_from_data(actions.as_ref())?;
-            }
+            metadata_opt = metadata_opt.or(Metadata::try_new_from_data(actions.as_ref())?);
+            protocol_opt = protocol_opt.or(Protocol::try_new_from_data(actions.as_ref())?);
         }
 
         let has_metadata_update = metadata_opt.is_some();
@@ -284,7 +282,7 @@ impl LogReplayScanner {
 
             table_configuration
                 .ensure_operation_supported(mode.read_operation())
-                .map_err(|e| mode.protocol_support_error(e, commit_file.version))?;
+                .map_err(|e| mode.read_support_error(e, commit_file.version))?;
         }
         // We resolve the remove deletion vector map after visiting the entire commit.
         if has_cdc_action {

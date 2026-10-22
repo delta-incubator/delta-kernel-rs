@@ -15,7 +15,9 @@ use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use url::Url;
 
-use crate::actions::{get_all_actions_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
+use crate::actions::{
+    get_all_actions_schema, Add, Cdc, CommitInfo, DomainMetadata, Metadata, Protocol, Remove,
+};
 use crate::arrow::array::{
     new_empty_array, new_null_array, ArrayRef, Int64Array, MapArray, RecordBatch, StringArray,
     StructArray,
@@ -116,6 +118,18 @@ pub(crate) enum Action {
     #[allow(unused)]
     #[serde(rename = "commitInfo")]
     CommitInfo(CommitInfo),
+    #[serde(rename = "domainMetadata")]
+    DomainMetadata(DomainMetadata),
+}
+
+/// Serializes `actions` in input order as newline-delimited JSON.
+///
+/// Panics if an action cannot be serialized.
+pub(crate) fn serialize_actions(actions: impl IntoIterator<Item = impl Serialize>) -> String {
+    actions
+        .into_iter()
+        .map(|action| serde_json::to_string(&action).unwrap())
+        .join("\n")
 }
 
 use crate::schema::{
@@ -145,10 +159,7 @@ impl LocalMockTable {
     }
     /// Writes all `actions` to a new commit in the log
     pub(crate) async fn commit(&mut self, actions: impl IntoIterator<Item = Action>) {
-        let data = actions
-            .into_iter()
-            .map(|action| serde_json::to_string(&action).unwrap())
-            .join("\n");
+        let data = serialize_actions(actions);
 
         let path = delta_path_for_version(self.commit_num, "json");
         self.commit_num += 1;

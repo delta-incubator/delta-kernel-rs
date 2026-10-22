@@ -1184,14 +1184,8 @@ async fn build_table_changes_with_commit_versions() {
 
     ///////// Specify start version and end version /////////
 
-    let log_segment = LogSegment::for_commit_range(
-        storage.as_ref(),
-        log_root.clone(),
-        2,
-        5,
-        LogLoadOptions::default(),
-    )
-    .unwrap();
+    let log_segment =
+        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 2, 5).unwrap();
     let commit_files = log_segment.listed.ascending_commit_files;
     let checkpoint_parts = log_segment.listed.checkpoint_parts;
 
@@ -1204,14 +1198,8 @@ async fn build_table_changes_with_commit_versions() {
     assert_eq!(versions, expected_versions);
 
     ///////// Start version and end version are the same /////////
-    let log_segment = LogSegment::for_commit_range(
-        storage.as_ref(),
-        log_root.clone(),
-        0,
-        Some(0),
-        LogLoadOptions::default(),
-    )
-    .unwrap();
+    let log_segment =
+        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 0, Some(0)).unwrap();
 
     let commit_files = log_segment.listed.ascending_commit_files;
     let checkpoint_parts = log_segment.listed.checkpoint_parts;
@@ -1223,14 +1211,7 @@ async fn build_table_changes_with_commit_versions() {
     assert_eq!(commit_files[0].version, 0);
 
     ///////// Specify no start or end version /////////
-    let log_segment = LogSegment::for_commit_range(
-        storage.as_ref(),
-        log_root,
-        0,
-        None,
-        LogLoadOptions::default(),
-    )
-    .unwrap();
+    let log_segment = LogSegment::for_table_changes(storage.as_ref(), log_root, 0, None).unwrap();
     let commit_files = log_segment.listed.ascending_commit_files;
     let checkpoint_parts = log_segment.listed.checkpoint_parts;
 
@@ -1241,58 +1222,6 @@ async fn build_table_changes_with_commit_versions() {
     let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
     let expected_versions = (0..=7).collect_vec();
     assert_eq!(versions, expected_versions);
-}
-
-#[rstest]
-#[case::gap_outside_range(
-    &[0, 2],
-    2,
-    Some(2),
-    Some(2),
-    "Log tail versions 0 and 2 are not contiguous",
-)]
-#[case::tail_ends_before_target(
-    &[0, 1],
-    0,
-    Some(2),
-    None,
-    "Log tail version 1 is less than requested version 2",
-)]
-#[test]
-fn commit_range_validates_entire_log_tail_before_listing(
-    #[case] log_tail_versions: &[Version],
-    #[case] start_version: Version,
-    #[case] end_version: Option<Version>,
-    #[case] max_catalog_version: Option<Version>,
-    #[case] expected_error: &str,
-) {
-    let log_root = Url::parse("memory:///_delta_log/").unwrap();
-    let log_tail = log_tail_versions
-        .iter()
-        .map(|version| {
-            LogPath::try_new(FileMeta {
-                location: log_root.join(&format!("{version:020}.json")).unwrap(),
-                last_modified: 0,
-                size: 1,
-            })
-            .unwrap()
-        })
-        .collect();
-    let mut load_options = LogLoadOptions::default().with_log_tail(log_tail);
-    if let Some(max_catalog_version) = max_catalog_version {
-        load_options = load_options.with_max_catalog_version(max_catalog_version);
-    }
-    let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
-
-    let result = LogSegment::for_commit_range(
-        engine.storage_handler().as_ref(),
-        log_root,
-        start_version,
-        end_version,
-        load_options,
-    );
-
-    assert_result_error_with_message(result, expected_error);
 }
 
 #[tokio::test]
@@ -1307,25 +1236,15 @@ async fn test_non_contiguous_log() {
     )
     .await;
 
-    let log_segment_res = LogSegment::for_commit_range(
-        storage.as_ref(),
-        log_root.clone(),
-        0,
-        None,
-        LogLoadOptions::default(),
-    );
+    let log_segment_res =
+        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 0, None);
     assert!(matches!(
         log_segment_res,
         Err(KernelError::MissingVersion(1))
     ));
 
-    let log_segment_res = LogSegment::for_commit_range(
-        storage.as_ref(),
-        log_root.clone(),
-        1,
-        None,
-        LogLoadOptions::default(),
-    );
+    let log_segment_res =
+        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 1, None);
     assert!(matches!(
         log_segment_res,
         Err(KernelError::StartVersionNotFound {
@@ -1334,13 +1253,7 @@ async fn test_non_contiguous_log() {
         })
     ));
 
-    let log_segment_res = LogSegment::for_commit_range(
-        storage.as_ref(),
-        log_root,
-        0,
-        Some(1),
-        LogLoadOptions::default(),
-    );
+    let log_segment_res = LogSegment::for_table_changes(storage.as_ref(), log_root, 0, Some(1));
     assert!(matches!(
         log_segment_res,
         Err(KernelError::MissingVersion(1))
@@ -1358,13 +1271,7 @@ async fn table_changes_fails_with_larger_start_version_than_end() {
         None,
     )
     .await;
-    let log_segment_res = LogSegment::for_commit_range(
-        storage.as_ref(),
-        log_root,
-        1,
-        Some(0),
-        LogLoadOptions::default(),
-    );
+    let log_segment_res = LogSegment::for_table_changes(storage.as_ref(), log_root, 1, Some(0));
     assert_result_error_with_message(log_segment_res, "Generic delta kernel error: Failed to build LogSegment: start_version cannot be greater than end_version");
 }
 
@@ -4738,7 +4645,7 @@ fn test_stats_parsed_mixed_with_one_incompatible_rejects_all() {
 
 /// Creates a checkpoint batch with `add.partitionValues_parsed` in the parquet schema.
 fn add_batch_with_partition_values_parsed(output_schema: SchemaRef) -> Box<ArrowEngineData> {
-    let handler = SyncJsonHandler::new(None, None);
+    let handler = SyncJsonHandler::new(None);
     let json_strings: StringArray = vec![
         r#"{"add":{"path":"part-00000.parquet","partitionValues":{"id":"1"},"partitionValues_parsed":{"id":1},"size":635,"modificationTime":1677811178336,"dataChange":true}}"#,
         r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":["id"],"configuration":{},"createdTime":1677811175819}}"#,
@@ -5615,14 +5522,9 @@ async fn read_actions_with_null_map_values(
 
     // Build engine and read actions -- same as DeltaActionExtractor::get_actions.
     let engine = SyncEngine::new_with_store(store);
-    let log_segment = LogSegment::for_commit_range(
-        engine.storage_handler().as_ref(),
-        log_root,
-        0,
-        Some(0),
-        LogLoadOptions::default(),
-    )
-    .unwrap();
+    let log_segment =
+        LogSegment::for_table_changes(engine.storage_handler().as_ref(), log_root, 0, Some(0))
+            .unwrap();
 
     // Use all_actions_schema to cover sidecar and checkpointMetadata (checkpoint-only actions).
     let action_schema = get_all_actions_schema().clone();

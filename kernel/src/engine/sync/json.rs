@@ -1,9 +1,8 @@
 use std::io::{BufReader, Cursor};
+use std::num::NonZero;
 use std::sync::Arc;
 
 use bytes::Bytes;
-#[cfg(test)]
-use derive_more::Constructor;
 #[cfg(test)]
 use url::Url;
 
@@ -26,10 +25,27 @@ use crate::{
 use crate::{KernelResult, PredicateRef};
 
 #[cfg(test)]
-#[derive(Constructor)]
 pub(crate) struct SyncJsonHandler {
     store: Option<Arc<DynObjectStore>>,
-    batch_size: Option<usize>,
+    batch_size: Option<NonZero<usize>>,
+}
+
+#[cfg(test)]
+impl SyncJsonHandler {
+    /// Create a JSON handler backed by `store`, or the local filesystem when absent.
+    pub(crate) fn new(store: Option<Arc<DynObjectStore>>) -> Self {
+        Self {
+            store,
+            batch_size: None,
+        }
+    }
+
+    /// Set the maximum number of rows per JSON file read batch.
+    #[cfg(test)]
+    pub(crate) fn with_batch_size(mut self, batch_size: NonZero<usize>) -> Self {
+        self.batch_size = Some(batch_size);
+        self
+    }
 }
 
 pub(super) fn try_create_from_json(
@@ -45,13 +61,13 @@ fn try_create_from_json_with_batch_size(
     data: Bytes,
     schema: SchemaRef,
     file_location: String,
-    batch_size: Option<usize>,
+    batch_size: Option<NonZero<usize>>,
 ) -> KernelResult<impl Iterator<Item = KernelResult<ArrowEngineData>>> {
     let json_schema = Arc::new(json_arrow_schema(&schema)?);
     let reorder_indices = build_json_reorder_indices(&schema)?;
     let mut reader_builder = ReaderBuilder::new(json_schema).with_coerce_primitive(true);
     if let Some(batch_size) = batch_size {
-        reader_builder = reader_builder.with_batch_size(batch_size);
+        reader_builder = reader_builder.with_batch_size(batch_size.get());
     }
     let json = reader_builder
         .build(BufReader::new(Cursor::new(data)))?
@@ -146,7 +162,7 @@ mod tests {
     fn do_test_write_json_file(overwrite: bool) -> KernelResult<()> {
         let test_dir = TempDir::new().unwrap();
         let path = test_dir.path().join("00000000000000000001.json");
-        let handler = SyncJsonHandler::new(None, None);
+        let handler = SyncJsonHandler::new(None);
         let url = Url::from_file_path(&path).unwrap();
 
         // First write with no existing file
@@ -185,7 +201,7 @@ mod tests {
     fn test_write_empty_json_file_reports_zero_size() -> KernelResult<()> {
         let test_dir = TempDir::new().unwrap();
         let path = test_dir.path().join("empty.json");
-        let handler = SyncJsonHandler::new(None, None);
+        let handler = SyncJsonHandler::new(None);
         let url = Url::from_file_path(&path).unwrap();
 
         let written_size = handler
@@ -202,6 +218,6 @@ mod tests {
     //
     // #[test]
     // fn json_handler_file_path_contract() {
-    //     test_json_handler_file_path_contract(&SyncJsonHandler::new(None, None));
+    //     test_json_handler_file_path_contract(&SyncJsonHandler::new(None));
     // }
 }

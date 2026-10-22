@@ -490,7 +490,7 @@ mod tests {
     use crate::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
     use crate::actions::{Add, Cdc, Remove};
     use crate::engine::sync::SyncEngine;
-    use crate::log_segment::{LogLoadOptions, LogSegment};
+    use crate::log_segment::LogSegment;
     use crate::scan::state::DvInfo;
     use crate::schema::schema_ref;
     use crate::table_changes::log_replay::{
@@ -546,12 +546,11 @@ mod tests {
         mock_table: &LocalMockTable,
     ) -> Vec<CdfScanFile> {
         let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
-        let log_segment = LogSegment::for_commit_range(
+        let log_segment = LogSegment::for_table_changes(
             engine.storage_handler().as_ref(),
             table_root.join("_delta_log/").unwrap(),
             0,
             None,
-            LogLoadOptions::default(),
         )
         .unwrap();
         let table_schema = schema_ref! {
@@ -650,14 +649,9 @@ mod tests {
 
         let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
         let log_root = table_root.join("_delta_log/").unwrap();
-        let log_segment = LogSegment::for_commit_range(
-            engine.storage_handler().as_ref(),
-            log_root,
-            0,
-            None,
-            LogLoadOptions::default(),
-        )
-        .unwrap();
+        let log_segment =
+            LogSegment::for_table_changes(engine.storage_handler().as_ref(), log_root, 0, None)
+                .unwrap();
         let table_schema = schema_ref! {
             nullable "id": INTEGER,
             nullable "value": STRING,

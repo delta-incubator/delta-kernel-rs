@@ -433,9 +433,11 @@ fn false_data_change_is_ignored() -> KernelResult<()> {
 #[test]
 fn invalid_range_end_before_start() {
     let res = read_cdf_for_table("cdf-table-simple", 1, 0, None);
-    let expected_msg =
-        "Failed to build LogSegment: start_version cannot be greater than end_version";
-    assert!(matches!(res, Err(KernelError::Generic(msg)) if msg == expected_msg));
+    assert!(matches!(
+        res,
+        Err(KernelError::Generic(message))
+            if message.contains("start_version (1) must be <= end_version (0)")
+    ));
 }
 
 #[test]

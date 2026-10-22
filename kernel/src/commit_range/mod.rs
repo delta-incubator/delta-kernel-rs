@@ -111,10 +111,6 @@ impl CommitRange {
         &self.table_root
     }
 
-    pub(crate) fn commit_files(&self) -> &[ParsedLogPath] {
-        &self.commit_files
-    }
-
     /// Iterator over the commits in the range, yielding one [`CommitAction`] per commit.
     ///
     /// - `engine`: performs the per-commit JSON reads.
@@ -184,6 +180,11 @@ impl CommitRange {
             latest_protocol,
             latest_metadata,
         })
+    }
+
+    /// Commit-file pointers in the ordering selected by the range builder.
+    pub(crate) fn commit_files(&self) -> &[ParsedLogPath] {
+        &self.commit_files
     }
 }
 

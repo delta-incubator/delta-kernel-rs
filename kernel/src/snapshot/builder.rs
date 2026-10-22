@@ -8,8 +8,8 @@ use tracing::{info, instrument};
 use crate::cancellation::CancellationTokenRef;
 use crate::engine::CancellableEngine;
 use crate::log_path::LogPath;
-use crate::log_segment::{validate_catalog_managed_versions, LogLoadOptions, LogSegment};
-use crate::log_segment_files::{CheckpointHandling, LogSegmentFiles};
+use crate::log_segment::{validate_catalog_managed_log_tail, LogSegment};
+use crate::log_segment_files::CheckpointHandling;
 use crate::metrics::events::SNAPSHOT_COMPLETED_SPAN;
 use crate::metrics::{MetricId, SnapshotLoadMetricContext, SnapshotLoadType};
 use crate::path::DELTA_LOG_DIR_WITH_SLASH;
@@ -285,12 +285,6 @@ impl<Mode> SnapshotBuilder<Mode> {
         self
     }
 
-    pub(crate) fn with_log_load_options(mut self, load_options: LogLoadOptions) -> Self {
-        self.max_catalog_version = load_options.max_catalog_version();
-        self.log_tail = load_options.log_tail().to_vec();
-        self
-    }
-
     /// Bound how many commits kernel will replay to advance a stale CRC to the target version.
     /// See [`IncrementalReplay`]. Defaults to [`IncrementalReplay::Disabled`].
     ///
@@ -390,14 +384,10 @@ impl<Mode> SnapshotBuilder<Mode> {
             let engine = scoped_engine
                 .as_ref()
                 .map_or(engine, |engine| engine as &dyn Engine);
-            let load_options = LogLoadOptions::new(max_catalog_version, log_tail);
-            load_options.validate(version)?;
-            let log_tail: Vec<_> = load_options
-                .log_tail()
-                .iter()
-                .cloned()
-                .map(Into::into)
-                .collect();
+            let log_tail: Vec<_> = log_tail.into_iter().map(Into::into).collect();
+
+            // Pre-build validations for catalog-managed tables
+            Self::validate_catalog_managed_build_inputs(version, max_catalog_version, &log_tail)?;
 
             // Use time-travel version if set, otherwise fall back to max_catalog_version. Passing
             // this as the version to LogSegment::for_snapshot does NOT skip the _last_checkpoint
@@ -457,6 +447,15 @@ impl<Mode> SnapshotBuilder<Mode> {
     // ============================================================================
 
     // ===== Catalog-managed Validations =====
+
+    /// Pre-build validations for catalog-managed table invariants.
+    fn validate_catalog_managed_build_inputs(
+        version: Option<Version>,
+        max_catalog_version: Option<Version>,
+        log_tail: &[crate::path::ParsedLogPath],
+    ) -> KernelResult<()> {
+        validate_catalog_managed_log_tail(version, max_catalog_version, log_tail)
+    }
 
     /// Post-build validation: catalog-managed tables must have max_catalog_version, and
     /// non-catalog-managed tables must not.
