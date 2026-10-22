@@ -17,8 +17,7 @@ use crate::plans::PlanExecutor;
 use crate::{
     CancellationTokenRef, Engine, EngineData, EvaluationHandler, FileDataReadResultIterator,
     FileMeta, FileSize, FileSlice, FilteredEngineData, JsonHandler, KernelResult,
-    KernelResultIterator, KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef,
-    SchemaRef, StorageHandler,
+    KernelResultIterator, ParquetFooter, ParquetHandler, PredicateRef, SchemaRef, StorageHandler,
 };
 
 /// An engine adapter that supplies a default cancellation token to storage, JSON, and
@@ -154,13 +153,13 @@ impl StorageHandler for ReadHandler<dyn StorageHandler> {
     cancellable_read_pair! {
         /// Lists files using a per-call token or the default token.
         fn list_from, list_from_with_cancellation(path: &Url)
-            -> KernelResult<KernelResultIteratorStatic<FileMeta>>;
+            -> KernelResult<Box<dyn KernelResultIterator<FileMeta>>>;
     }
 
     cancellable_read_pair! {
         /// Reads byte ranges using a per-call token or the default token.
         fn read_files, read_files_with_cancellation(files: Vec<FileSlice>)
-            -> KernelResult<KernelResultIteratorStatic<Bytes>>;
+            -> KernelResult<Box<dyn KernelResultIterator<Bytes>>>;
     }
 
     /// Returns file metadata after checking the default token for cancellation.
@@ -198,7 +197,9 @@ impl JsonHandler for ReadHandler<dyn JsonHandler> {
 
         /// Writes JSON batches without applying read cancellation.
         fn write_json_file(
-            path: &Url, data: KernelResultIterator<'_, FilteredEngineData>, overwrite: bool,
+            path: &Url,
+            data: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
+            overwrite: bool,
         ) -> KernelResult<FileSize>;
     }
 }
@@ -220,7 +221,7 @@ impl ParquetHandler for ReadHandler<dyn ParquetHandler> {
     forward_methods! {
         /// Writes Parquet batches without applying read cancellation.
         fn write_parquet_file(
-            location: Url, data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+            location: Url, data: Box<dyn KernelResultIterator<Box<dyn EngineData>>>,
         ) -> KernelResult<FileSize>;
     }
 }

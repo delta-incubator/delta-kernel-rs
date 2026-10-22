@@ -36,8 +36,7 @@ use crate::transaction::data_layout::DataLayout;
 use crate::unit_test_utils::TestCancellationToken;
 use crate::{
     CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
-    KernelResult, KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef,
-    Snapshot,
+    KernelResult, KernelResultIterator, ParquetFooter, ParquetHandler, PredicateRef, Snapshot,
 };
 
 #[cfg(feature = "geo-type-in-dev")]
@@ -1833,7 +1832,7 @@ impl ParquetHandler for RecordingParquetHandler {
     fn write_parquet_file(
         &self,
         location: url::Url,
-        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+        data: Box<dyn KernelResultIterator<Box<dyn EngineData>>>,
     ) -> KernelResult<FileSize> {
         self.inner.write_parquet_file(location, data)
     }
@@ -2756,7 +2755,7 @@ impl ParquetHandler for EmptyParquetHandler {
     fn write_parquet_file(
         &self,
         _location: url::Url,
-        _data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+        _data: Box<dyn KernelResultIterator<Box<dyn EngineData>>>,
     ) -> KernelResult<FileSize> {
         unimplemented!()
     }
