@@ -119,23 +119,17 @@ async fn build_log_with_paths_and_checkpoint(
             .await
             .expect("put log file in store");
     }
-    if let Some(checkpoint_metadata) = checkpoint_metadata {
-        let checkpoint_str =
-            serde_json::to_string(checkpoint_metadata).expect("Serialize checkpoint");
-        store
-            .put(
-                &Path::from("_delta_log/_last_checkpoint"),
-                checkpoint_str.into(),
-            )
-            .await
-            .expect("Write _last_checkpoint");
-    }
 
     let engine = SyncEngine::new_with_store(store);
     let storage = engine.storage_handler();
 
     let table_root = Url::parse("memory:///").expect("valid url");
     let log_root = table_root.join("_delta_log/").unwrap();
+    if let Some(checkpoint_metadata) = checkpoint_metadata {
+        checkpoint_metadata
+            .write(storage.as_ref(), &log_root)
+            .expect("Write _last_checkpoint");
+    }
     (storage, log_root)
 }
 
@@ -3516,14 +3510,19 @@ fn checkpoint_hint_sidecar_file_schema_resolution(
 }
 
 /// Checkpoint schema resolution uses the `_last_checkpoint` schema only when the hint's version
-/// matches [`LogSegment::checkpoint_version`]. Otherwise the parquet footer is read.
+/// matches [`LogSegment::checkpoint_version`] and its `sizeInBytes`, if any, matches the checkpoint
+/// file. Otherwise the parquet footer is read. `hint_size_offset` is the hint's size minus the
+/// file size.
 #[rstest]
-#[case::hint_matches_checkpoint(1, true)]
-#[case::hint_newer_than_checkpoint(99, false)]
-#[case::hint_older_than_checkpoint(0, false)]
+#[case::hint_matches_checkpoint(1, None, true)]
+#[case::hint_newer_than_checkpoint(99, None, false)]
+#[case::hint_older_than_checkpoint(0, None, false)]
+#[case::hint_size_matches_checkpoint(1, Some(0), true)]
+#[case::hint_size_differs_from_checkpoint(1, Some(1), false)]
 #[tokio::test]
 async fn test_get_file_actions_schema_v1_parquet_with_hint(
     #[case] hint_version: u64,
+    #[case] hint_size_offset: Option<u64>,
     #[case] expect_hint_schema_used: bool,
 ) -> KernelResult<()> {
     let (store, log_root) = new_in_memory_store();
@@ -3560,6 +3559,7 @@ async fn test_get_file_actions_schema_v1_parquet_with_hint(
         None,
         Some(LastCheckpointHint {
             version: hint_version,
+            size_in_bytes: hint_size_offset.map(|offset| (cp_size + offset) as i64),
             checkpoint_schema: Some(hint_schema.clone()),
             ..Default::default()
         }),
@@ -3576,7 +3576,7 @@ async fn test_get_file_actions_schema_v1_parquet_with_hint(
     } else {
         assert!(
             log_segment.checkpoint_hint_schema().is_none(),
-            "hint should not have been returned since version does not match checkpoint_version"
+            "hint should not have been returned since it does not describe the checkpoint"
         );
     }
 
@@ -3585,11 +3585,14 @@ async fn test_get_file_actions_schema_v1_parquet_with_hint(
     let (schema, sidecars) = log_segment.get_file_actions_schema_and_sidecars(&engine, None)?;
     let schema = schema.expect("V1 checkpoint should yield a file actions schema");
     if expect_hint_schema_used {
-        assert_eq!(schema, hint_schema, "should use hint when versions match");
+        assert_eq!(
+            schema, hint_schema,
+            "should use the hint that describes the checkpoint"
+        );
     } else {
         assert_eq!(
             schema, v1_schema,
-            "should read schema from parquet footer when versions mismatch"
+            "should read schema from parquet footer when the hint does not describe the checkpoint"
         );
     }
     assert!(sidecars.is_empty(), "V1 checkpoint should have no sidecars");
@@ -5148,9 +5151,7 @@ async fn test_try_new_with_checkpoint(
     assert_eq!(result.log_root, log_segment.log_root);
 }
 
-/// The new segment keeps the hint written for its checkpoint and applies it. When no hint was
-/// written because the existing one is newer, the existing hint stays, and it does not apply to the
-/// new checkpoint.
+/// Without a written hint, the newer existing hint stays and does not apply to the new checkpoint.
 #[rstest]
 #[case::written_hint(true)]
 #[case::newer_existing_hint(false)]
@@ -5871,11 +5872,7 @@ fn snapshot_with_amt_last_checkpoint_hint_skips_earlier_commits() -> KernelResul
         ..Default::default()
     };
     let log_root = table_root.join("_delta_log/")?;
-    engine.storage_handler().put(
-        &LastCheckpointHint::path(&log_root)?,
-        hint.to_json_bytes().into(),
-        true,
-    )?;
+    hint.write(engine.storage_handler().as_ref(), &log_root)?;
 
     let snapshot = Snapshot::builder_for(table_root).build(&engine)?;
     assert_eq!(extract_commit_versions(snapshot.log_segment()), vec![2]);

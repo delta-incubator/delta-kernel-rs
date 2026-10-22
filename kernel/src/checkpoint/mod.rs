@@ -152,10 +152,9 @@ mod tests;
 /// Information about a freshly-written checkpoint. Pass it to
 /// [`CheckpointWriter::finalize`] to produce the `_last_checkpoint` hint file.
 ///
-/// Unlike [`LastCheckpointHint`], which is used on the read path and has many optional
-/// fields, this struct focuses on the write path and all fields are required. Note this
-/// is a kernel requirement; the Delta protocol itself marks some of these fields as
-/// optional in the `_last_checkpoint` hint. See the [Last Checkpoint File Schema] for
+/// Unlike [`LastCheckpointHint`], which has many optional fields, all fields of this struct are
+/// required. Note this is a kernel requirement; the Delta protocol itself marks some of these
+/// fields as optional in the `_last_checkpoint` hint. See the [Last Checkpoint File Schema] for
 /// more details.
 ///
 /// Construct via [`LastCheckpointHintStats::from_reconciliation_state`].
@@ -171,12 +170,12 @@ mod tests;
 pub struct LastCheckpointHintStats {
     /// The total number of actions stored in the checkpoint (including actions created
     /// outside the reconciliation iterator, e.g. sidecar actions).
-    num_actions: i64,
+    pub(crate) num_actions: i64,
     /// The total size in bytes of the checkpoint. For V2 checkpoint with sidecars,
     /// this is the sum of the main checkpoint file size and all sidecar file sizes.
-    size_in_bytes: i64,
+    pub(crate) size_in_bytes: i64,
     /// The number of Add-file actions in the checkpoint.
-    num_of_add_files: i64,
+    pub(crate) num_of_add_files: i64,
 }
 
 impl LastCheckpointHintStats {
@@ -344,13 +343,11 @@ pub struct CheckpointWriter {
     /// Reference to the snapshot (i.e. version) of the table being checkpointed
     pub(crate) snapshot: SnapshotRef,
 
-    /// The version of the snapshot being checkpointed.
-    /// Note: Although the version is stored as a u64 in the snapshot, it is stored as an i64
-    /// field here to avoid multiple type conversions.
-    version: i64,
-
     is_v2: bool,
     read_schema: SchemaRef,
+    /// Schema of every [`Self::checkpoint_data`] batch and of the top-level checkpoint file.
+    /// `_last_checkpoint` records it as `checkpointSchema`, so every write path must write the
+    /// top-level file with exactly this schema.
     output_schema: SchemaRef,
     transform_expr: ExpressionRef,
 }
@@ -388,7 +385,6 @@ impl CheckpointWriter {
         )?;
 
         Ok(Self {
-            version: version_as_i64(snapshot.version())?,
             snapshot,
             is_v2: schema_context.is_v2,
             read_schema,
@@ -425,6 +421,8 @@ impl CheckpointWriter {
     /// The returned [`ActionReconciliationIterator`] yields [`FilteredEngineData`] batches with
     /// stats transforms already applied. Use [`ActionReconciliationIterator::state`] to get the
     /// shared state for building a [`LastCheckpointHintStats`] after the iterator is exhausted.
+    /// Write the batches without adding, dropping, or retyping columns: [`Self::finalize`] records
+    /// their schema in `_last_checkpoint`.
     ///
     /// # Engine Usage
     ///
@@ -508,11 +506,15 @@ impl CheckpointWriter {
     /// 2. All data has been successfully written to object storage
     ///
     /// This method records the schema of the [`Self::checkpoint_data`] batches as the
-    /// `checkpointSchema` of `_last_checkpoint`. Readers use it instead of the checkpoint file
-    /// footer, so the engine must write those batches without changing their schema.
+    /// `checkpointSchema` of `_last_checkpoint`, and readers use it instead of the checkpoint file
+    /// footer. So the checkpoint file (for a V2 checkpoint with sidecars, the top-level file) must
+    /// not add, drop, or retype any column of those batches. The method writes nothing if
+    /// `_last_checkpoint` already describes a newer checkpoint. It omits `checkpointSchema` if the
+    /// schema JSON is longer than 20,000 bytes or too deeply nested to parse back.
     ///
     /// # Parameters
-    /// - `engine`: Implementation of [`Engine`] APIs.
+    /// - `engine`: Implementation of [`Engine`] APIs. This method writes `_last_checkpoint` with
+    ///   [`StorageHandler::put`](crate::StorageHandler::put).
     /// - `last_checkpoint_stats`: The [`LastCheckpointHintStats`] containing fields needed to write
     ///   the `_last_checkpoint` file.
     ///
@@ -548,11 +550,9 @@ impl CheckpointWriter {
 
         let hint = LastCheckpointHint::for_classic_checkpoint(
             checkpoint_version,
-            last_checkpoint_stats.num_actions,
-            last_checkpoint_stats.size_in_bytes,
-            last_checkpoint_stats.num_of_add_files,
+            last_checkpoint_stats,
             self.output_schema.clone(),
-        )?;
+        );
         hint.write(
             engine.storage_handler().as_ref(),
             &self.snapshot.log_segment().log_root,
@@ -691,7 +691,7 @@ impl CheckpointWriter {
         // Build the checkpointMetadata struct value. `tags` is left unset (null) since kernel
         // does not currently emit checkpoint tags.
         let checkpoint_metadata_value: Scalar = CheckpointMetadata {
-            version: self.version,
+            version: version_as_i64(self.snapshot.version())?,
             tags: None,
         }
         .into();

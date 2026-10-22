@@ -1,5 +1,4 @@
-//! Utilities for reading and writing the `_last_checkpoint` file. Maybe this file should instead go
-//! under log_segment module since it should only really be used there? as hint for listing?
+//! Utilities for reading and writing the `_last_checkpoint` file.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,8 +12,10 @@ use url::Url;
 use crate::actions::CheckpointAction;
 use crate::actions::{
     CheckpointMetadata, DomainMetadata, Metadata, Protocol, SetTransaction, Sidecar,
+    CHECKPOINT_METADATA_NAME,
 };
 use crate::cancellation::CancellationTokenRef;
+use crate::checkpoint::LastCheckpointHintStats;
 use crate::path::{CheckpointInstance, ParsedLogPath};
 use crate::schema::SchemaRef;
 use crate::{FileMeta, KernelError, KernelResult, StorageHandler, Version};
@@ -31,12 +32,11 @@ const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 const LAST_CHECKPOINT_SIDECARS_THRESHOLD: usize = 30;
 const LAST_CHECKPOINT_NON_FILE_ACTIONS_THRESHOLD: usize = 30;
 
-/// Maximum length of the `checkpointSchema` JSON that kernel writes. Matches the Delta-Spark
-/// default for `checkpointSchema.writeThresholdLength`, which omits a longer schema:
+/// Maximum length in bytes of the `checkpointSchema` JSON that kernel writes. Matches the
+/// Delta-Spark default for `checkpointSchema.writeThresholdLength`, which omits a longer schema:
 /// <https://github.com/delta-io/delta/blob/ad9f4f0ac8eb907928deebdd47c9b66842843d16/spark/src/main/scala/org/apache/spark/sql/delta/sources/DeltaSQLConf.scala#L1435-L1441>
 const LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH: usize = 20_000;
 
-// Note: Schema can not be derived because the checkpoint schema is only known at runtime.
 // Absent optional fields are not serialized: Delta-Spark validates a `checksum` key whenever it is
 // present, so it rejects `"checksum": null`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -334,47 +334,30 @@ impl LastCheckpointHint {
     }
 
     /// Builds the hint for a classic-named, single-file checkpoint whose file has schema
-    /// `checkpoint_schema`. The hint omits a schema whose JSON is longer than
-    /// [`LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH`], so readers then read the checkpoint footer.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `checkpoint_schema` cannot be serialized to JSON.
+    /// `checkpoint_schema`.
     pub(crate) fn for_classic_checkpoint(
         version: Version,
-        size: i64,
-        size_in_bytes: i64,
-        num_of_add_files: i64,
+        stats: &LastCheckpointHintStats,
         checkpoint_schema: SchemaRef,
-    ) -> KernelResult<Self> {
-        let schema_length = serde_json::to_string(checkpoint_schema.as_ref())?.len();
-        let checkpoint_schema = if schema_length <= LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH {
-            Some(checkpoint_schema)
-        } else {
-            debug!(
-                version,
-                schema_length, "omitting _last_checkpoint checkpointSchema above threshold"
-            );
-            None
-        };
-        Ok(Self {
+    ) -> Self {
+        Self {
             version,
-            size,
+            size: stats.num_actions,
             parts: None,
-            size_in_bytes: Some(size_in_bytes),
-            num_of_add_files: Some(num_of_add_files),
-            checkpoint_schema,
+            size_in_bytes: Some(stats.size_in_bytes),
+            num_of_add_files: Some(stats.num_of_add_files),
+            checkpoint_schema: Some(checkpoint_schema),
             // TODO(#838): Write the `checksum` field.
             checksum: None,
             // TODO(#1054): Write the `tags` field.
             tags: None,
-            // TODO(#1052): Write the `v2Checkpoint` field.
+            // A `v2Checkpoint` object implies a UUID-named checkpoint, so a classic hint has none.
             v2_checkpoint: None,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             checkpoint_type: None,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             amt_checkpoint: None,
-        })
+        }
     }
 
     /// The version of the manifest commit carrying an AMT hint's checkpoint action, or `None` if
@@ -391,7 +374,8 @@ impl LastCheckpointHint {
 
     /// Whether this hint describes the checkpoint a log segment selected, given that segment's
     /// `checkpoint_parts`. Multiple checkpoints can share a version, so a matching version alone is
-    /// not enough: the hint's own identity must equal the selected checkpoint's.
+    /// not enough: the hint's own identity must equal the selected checkpoint's, and its size must
+    /// match the selected files (see [`Self::size_matches`]).
     ///
     /// On a mismatch, callers read the checkpoint file itself instead of trusting the hint's
     /// fields.
@@ -401,6 +385,35 @@ impl LastCheckpointHint {
         };
         self.version == selected.version
             && CheckpointInstance::of(selected) == self.implied_instance()
+            && self.size_matches(checkpoint_parts)
+    }
+
+    /// Whether `sizeInBytes` equals the total size of `checkpoint_parts`. Another writer can
+    /// replace a classic-named or multi-part checkpoint file, so a hint with a different size
+    /// can describe a different file. A hint without `sizeInBytes` gives no evidence. A hint
+    /// that can describe a V2 checkpoint is not checked: its `sizeInBytes` also counts the
+    /// sidecar files, which a log segment does not list.
+    fn size_matches(&self, checkpoint_parts: &[ParsedLogPath<FileMeta>]) -> bool {
+        let Some(size_in_bytes) = self.size_in_bytes else {
+            return true;
+        };
+        if self.can_describe_v2_checkpoint() {
+            return true;
+        }
+        let listed_size = checkpoint_parts
+            .iter()
+            .try_fold(0u64, |total, part| total.checked_add(part.location.size));
+        listed_size.and_then(|size| i64::try_from(size).ok()) == Some(size_in_bytes)
+    }
+
+    /// Whether this hint can describe a V2 checkpoint: it has a `v2Checkpoint` object, or its
+    /// schema has the `checkpointMetadata` column that every V2 checkpoint has.
+    fn can_describe_v2_checkpoint(&self) -> bool {
+        self.v2_checkpoint.is_some()
+            || self
+                .checkpoint_schema
+                .as_ref()
+                .is_some_and(|schema| schema.field(CHECKPOINT_METADATA_NAME).is_some())
     }
 
     /// The checkpoint identity this hint's fields describe, mirroring Delta-Spark's
@@ -548,14 +561,38 @@ impl LastCheckpointHint {
     }
 
     /// Writes this hint to the `_last_checkpoint` file under `log_root`, replacing an existing
-    /// file.
+    /// file. The file omits `checkpointSchema` if the schema JSON is longer than
+    /// [`LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH`] bytes, or if the hint with it does not parse
+    /// back (the JSON parser limits the nesting depth).
     ///
     /// # Errors
     ///
     /// Returns an error if the hint cannot be serialized or the write fails.
     pub(crate) fn write(&self, storage: &dyn StorageHandler, log_root: &Url) -> KernelResult<()> {
+        storage.put(&Self::path(log_root)?, self.to_file_bytes()?.into(), true)
+    }
+
+    /// The `_last_checkpoint` JSON that [`Self::write`] stores.
+    fn to_file_bytes(&self) -> KernelResult<Vec<u8>> {
         let bytes = serde_json::to_vec(self)?;
-        storage.put(&Self::path(log_root)?, bytes.into(), true)
+        let Some(schema) = &self.checkpoint_schema else {
+            return Ok(bytes);
+        };
+        let schema_length = serde_json::to_vec(schema.as_ref())?.len();
+        if schema_length <= LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH
+            && Self::from_bytes_with_oversized_fields_dropped(&bytes).is_ok()
+        {
+            return Ok(bytes);
+        }
+        debug!(
+            version = self.version,
+            schema_length, "omitting checkpointSchema from _last_checkpoint"
+        );
+        let without_schema = Self {
+            checkpoint_schema: None,
+            ..self.clone()
+        };
+        Ok(serde_json::to_vec(&without_schema)?)
     }
 
     /// Succinct summary string for logging purposes.
@@ -642,7 +679,7 @@ mod tests {
     use crate::object_store::memory::InMemory;
     use crate::schema::{schema, schema_ref, DataType, StructField, StructType};
     use crate::table_features::TableFeature;
-    use crate::unit_test_utils::{create_log_path, load_test_table};
+    use crate::unit_test_utils::{create_log_path, create_log_path_with_size, load_test_table};
     use crate::{Engine, KernelResultIteratorStatic};
 
     /// A real `_last_checkpoint` for a V2 checkpoint carries a `v2Checkpoint` object; we parse its
@@ -1319,20 +1356,49 @@ mod tests {
         schema("x".repeat(json_length - unnamed_length))
     }
 
-    #[rstest]
-    #[case::at_threshold(LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH, true)]
-    #[case::above_threshold(LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH + 1, false)]
-    fn classic_checkpoint_hint_bounds_checkpoint_schema(
-        #[case] schema_json_length: usize,
-        #[case] expect_schema: bool,
-    ) {
-        let schema = schema_with_json_length(schema_json_length);
-        let hint = LastCheckpointHint::for_classic_checkpoint(1, 2, 3, 4, schema.clone()).unwrap();
-        assert_eq!(hint.checkpoint_schema, expect_schema.then_some(schema));
+    /// A schema with `depth` levels of nested structs.
+    fn nested_schema(depth: usize) -> SchemaRef {
+        let mut schema = StructType::new_unchecked([StructField::nullable("leaf", DataType::LONG)]);
+        for _ in 1..depth {
+            schema = StructType::new_unchecked([StructField::nullable("nested", schema)]);
+        }
+        Arc::new(schema)
     }
 
-    /// The written hint has `checkpointSchema` as a JSON object, no absent fields, and `version`
-    /// and `size` first, as Delta-Spark writes them. `try_read` parses it back to the same hint.
+    /// The hint in memory keeps its schema, and the file drops a schema that readers cannot use.
+    #[rstest]
+    #[case::at_threshold(schema_with_json_length(LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH), true)]
+    #[case::above_threshold(
+        schema_with_json_length(LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH + 1),
+        false
+    )]
+    #[case::nested_beyond_parser_limit(nested_schema(45), false)]
+    fn write_omits_checkpoint_schema_that_readers_cannot_use(
+        #[case] schema: SchemaRef,
+        #[case] schema_written: bool,
+    ) {
+        let log_root = Url::parse("memory:///_delta_log/").unwrap();
+        let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
+        let storage = engine.storage_handler();
+        let hint = LastCheckpointHint {
+            version: 1,
+            size: 2,
+            checkpoint_schema: Some(schema.clone()),
+            ..Default::default()
+        };
+
+        hint.write(storage.as_ref(), &log_root).unwrap();
+
+        let read = LastCheckpointHint::try_read(storage.as_ref(), &log_root, None).unwrap();
+        let expected = LastCheckpointHint {
+            checkpoint_schema: schema_written.then_some(schema),
+            ..hint
+        };
+        assert_eq!(read, Some(expected));
+    }
+
+    /// The file has `checkpointSchema` as a JSON object and omits `None` fields, as Delta-Spark
+    /// writes them.
     #[test]
     fn classic_checkpoint_hint_round_trips_through_last_checkpoint_file() {
         let log_root = Url::parse("memory:///_delta_log/").unwrap();
@@ -1341,8 +1407,12 @@ mod tests {
         let schema = schema_ref! {
             nullable "add": { not_null "path": STRING, nullable "size": LONG },
         };
-        let hint =
-            LastCheckpointHint::for_classic_checkpoint(5, 10, 1234, 3, schema.clone()).unwrap();
+        let stats = LastCheckpointHintStats {
+            num_actions: 10,
+            size_in_bytes: 1234,
+            num_of_add_files: 3,
+        };
+        let hint = LastCheckpointHint::for_classic_checkpoint(5, &stats, schema.clone());
 
         hint.write(storage.as_ref(), &log_root).unwrap();
 
@@ -1353,10 +1423,8 @@ mod tests {
             .next()
             .unwrap()
             .unwrap();
-        let json = std::str::from_utf8(&bytes).unwrap();
-        assert!(json.starts_with(r#"{"version":5,"size":10,"#), "{json}");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(json).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
             serde_json::json!({
                 "version": 5,
                 "size": 10,
@@ -1371,12 +1439,58 @@ mod tests {
         );
     }
 
-    /// Delta-Spark writes the checkpoint file schema as `checkpointSchema`: the schema of each part
-    /// of a multi-part checkpoint, and of the top-level file of a V2 checkpoint.
+    /// A V1 hint whose `sizeInBytes` differs from the listed checkpoint files does not apply. A
+    /// hint for a V2 checkpoint is not checked, because its size also counts the sidecars.
+    #[rstest]
+    #[case::classic_size_matches(false, Some(30), false, true)]
+    #[case::classic_size_differs(false, Some(31), false, false)]
+    #[case::classic_without_size(false, None, false, true)]
+    #[case::v2_size_counts_sidecars(false, Some(31), true, true)]
+    #[case::multi_part_size_matches(true, Some(30), false, true)]
+    #[case::multi_part_size_differs(true, Some(20), false, false)]
+    fn applies_to_checks_size_in_bytes(
+        #[case] multi_part: bool,
+        #[case] size_in_bytes: Option<i64>,
+        #[case] v2_schema: bool,
+        #[case] applies: bool,
+    ) {
+        let root = Url::parse("memory:///_delta_log/").unwrap();
+        let part =
+            |name: &str, size| create_log_path_with_size(root.join(name).unwrap().as_str(), size);
+        let parts = if multi_part {
+            vec![
+                part(
+                    "00000000000000000001.checkpoint.0000000001.0000000002.parquet",
+                    10,
+                ),
+                part(
+                    "00000000000000000001.checkpoint.0000000002.0000000002.parquet",
+                    20,
+                ),
+            ]
+        } else {
+            vec![part("00000000000000000001.checkpoint.parquet", 30)]
+        };
+        let schema = if v2_schema {
+            schema_ref! { nullable "checkpointMetadata": { nullable "version": LONG } }
+        } else {
+            schema_ref! { nullable "add": { nullable "path": STRING } }
+        };
+        let hint = LastCheckpointHint {
+            version: 1,
+            parts: multi_part.then_some(2),
+            size_in_bytes,
+            checkpoint_schema: Some(schema),
+            ..Default::default()
+        };
+        assert_eq!(hint.applies_to(&parts), applies);
+    }
+
+    /// Delta-Spark's `checkpointSchema` is the footer schema of each checkpoint part, and of the
+    /// top-level file of a V2 checkpoint.
     #[rstest]
     #[case::v1_single_part("v1-single-part-struct-stats-only")]
     #[case::v1_multi_part("v1-multi-part-struct-stats-only")]
-    #[case::v2_without_sidecars("v2-classic-parquet-struct-stats-only")]
     #[case::v2_with_sidecars("v2-parquet-sidecars-struct-stats-only")]
     fn spark_checkpoint_schema_matches_checkpoint_footer(#[case] table: &str) -> KernelResult<()> {
         let (engine, snapshot, _tempdir) = load_test_table(table)?;
