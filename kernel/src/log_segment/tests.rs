@@ -3798,10 +3798,8 @@ async fn test_sidecar_lookup_requires_checkpoint_metadata_column(
 
     let (file_actions_schema, sidecars) =
         log_segment.get_file_actions_schema_and_sidecars(&engine, None)?;
-    if has_checkpoint_metadata {
-        assert_eq!(sidecars.len(), 1);
-    } else {
-        assert!(sidecars.is_empty());
+    assert_eq!(sidecars.len(), usize::from(has_checkpoint_metadata));
+    if !has_checkpoint_metadata {
         assert_eq!(file_actions_schema, Some(checkpoint_schema));
     }
     Ok(())

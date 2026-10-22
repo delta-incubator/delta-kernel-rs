@@ -1167,7 +1167,6 @@ impl LogSegment {
                 self.read_sidecar_schema_and_files(engine, checkpoint, None, cancellation_token)
             }
             ClassicCheckpoint | UuidCheckpoint if checkpoint.extension.as_str() == "parquet" => {
-                // Parquet checkpoint (classic-named or UUID-named): either can be V1 or V2.
                 let checkpoint_schema = Self::read_checkpoint_schema(
                     engine,
                     checkpoint,

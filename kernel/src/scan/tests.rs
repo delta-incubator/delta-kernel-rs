@@ -2,17 +2,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ::test_utils::table_builder::{FeatureSet, LogState, TestTableBuilder, VersionTarget};
-use ::test_utils::{assert_result_error_with_message, get_column, load_test_data};
+use ::test_utils::table_builder::VersionTarget;
+use ::test_utils::{assert_result_error_with_message, build_snapshot, get_column, load_test_data};
 use bytes::Bytes;
 use rstest::rstest;
 use url::Url;
 
 use super::*;
-use crate::actions::{
-    CHECKPOINT_METADATA_NAME, MAX_VALUES, MIN_VALUES, NULL_COUNT, NUM_RECORDS, SIDECAR_NAME,
-    STATS_PARSED,
-};
+use crate::actions::{MAX_VALUES, MIN_VALUES, NULL_COUNT, NUM_RECORDS, SIDECAR_NAME, STATS_PARSED};
 use crate::arrow::array::{Array, BooleanArray, Int64Array, StringArray, StructArray};
 use crate::arrow::compute::filter_record_batch;
 use crate::arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema as ArrowSchema};
@@ -35,10 +32,12 @@ use crate::schema::{
     self, schema, schema_ref, ColumnMetadataKey, DataType, MetadataColumnSpec, StructField,
     StructType,
 };
-use crate::snapshot::CheckpointWriteResult;
+use crate::snapshot::{CheckpointWriteResult, ChecksumWriteResult};
 use crate::transaction::create_table::create_table;
 use crate::transaction::data_layout::DataLayout;
-use crate::unit_test_utils::TestCancellationToken;
+use crate::unit_test_utils::{
+    kernel_checkpoint_footer_schema, kernel_checkpoint_table, TestCancellationToken,
+};
 use crate::{
     CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
     KernelResult, KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef,
@@ -1769,7 +1768,6 @@ impl RecordingParquetHandler {
         std::mem::take(&mut *self.reads.lock().unwrap())
     }
 
-    /// The top-level column names of each recorded read.
     fn take_read_columns(&self) -> Vec<Vec<String>> {
         self.take_reads()
             .iter()
@@ -1861,55 +1859,28 @@ enum CheckpointReadPath {
 #[rstest]
 #[case::fresh_load_from_last_checkpoint(CheckpointReadPath::Load(VersionTarget::Latest))]
 #[case::snapshot_returned_by_checkpoint(CheckpointReadPath::CheckpointResult)]
-#[case::incremental_update(CheckpointReadPath::Load(VersionTarget::IncrementalToLatest { from: 0 }))]
+#[case::incremental_update(CheckpointReadPath::Load(
+    VersionTarget::IncrementalToLatest { from: 0 }
+))]
 #[case::time_travel_to_checkpoint(CheckpointReadPath::Load(VersionTarget::AtVersion(1)))]
 fn scan_looks_up_kernel_checkpoint_sidecars_only_if_v2(
     #[case] read_path: CheckpointReadPath,
     #[values(false, true)] v2_checkpoint: bool,
 ) {
-    let features = FeatureSet::empty();
-    let table = TestTableBuilder::new()
-        .with_log_state(LogState::with_latest_version(2).with_checkpoint_at([1]))
-        .with_features(if v2_checkpoint {
-            features.v2_checkpoint()
-        } else {
-            features
-        })
-        .build()
-        .unwrap();
+    let table = kernel_checkpoint_table(v2_checkpoint);
     let sync = Arc::new(SyncEngine::new_with_store(table.store().clone()));
     let recorder = Arc::new(RecordingParquetHandler::new(sync.parquet_handler()));
     let engine = DelegatingEngine::new(sync).with_parquet_handler(recorder.clone());
     let table_root = table.table_root();
     let snapshot = match read_path {
-        CheckpointReadPath::Load(target) => {
-            ::test_utils::build_snapshot!(target, table_root, &engine)
-        }
+        CheckpointReadPath::Load(target) => build_snapshot!(target, table_root, &engine),
         CheckpointReadPath::CheckpointResult => {
             let latest = Snapshot::builder_for(table_root).build(&engine).unwrap();
-            recorder.take_reads();
-            let (result, checkpointed) = latest.checkpoint(&engine, None).unwrap();
-            assert_eq!(result, CheckpointWriteResult::Written);
-            let sidecar_lookups = recorder
-                .take_read_columns()
-                .iter()
-                .filter(|columns| columns[..] == [SIDECAR_NAME])
-                .count();
-            assert_eq!(sidecar_lookups, usize::from(v2_checkpoint));
-            checkpointed
+            latest.checkpoint(&engine, None).unwrap().1
         }
     };
     let checkpoint = &snapshot.log_segment().listed.checkpoint_parts[0].location;
-    let footer_schema = engine
-        .parquet_handler()
-        .read_parquet_footer(checkpoint)
-        .unwrap()
-        .schema;
-    assert!(footer_schema.contains(SIDECAR_NAME));
-    assert_eq!(
-        footer_schema.contains(CHECKPOINT_METADATA_NAME),
-        v2_checkpoint
-    );
+    kernel_checkpoint_footer_schema(&engine, checkpoint, v2_checkpoint);
     recorder.take_reads();
 
     let scan = snapshot.scan_builder().build().unwrap();
@@ -1923,6 +1894,48 @@ fn scan_looks_up_kernel_checkpoint_sidecars_only_if_v2(
         &[&[ADD_NAME]]
     };
     assert_eq!(recorder.take_read_columns(), expected_reads);
+}
+
+enum WriteFromCheckpoint {
+    Checkpoint,
+    Checksum,
+}
+
+#[rstest]
+#[case::checkpoint(WriteFromCheckpoint::Checkpoint)]
+#[case::checksum(WriteFromCheckpoint::Checksum)]
+fn writes_look_up_kernel_checkpoint_sidecars_only_if_v2(
+    #[case] write: WriteFromCheckpoint,
+    #[values(false, true)] v2_checkpoint: bool,
+) {
+    let table = kernel_checkpoint_table(v2_checkpoint);
+    let sync = Arc::new(SyncEngine::new_with_store(table.store().clone()));
+    let recorder = Arc::new(RecordingParquetHandler::new(sync.parquet_handler()));
+    let engine = DelegatingEngine::new(sync).with_parquet_handler(recorder.clone());
+    let snapshot = Snapshot::builder_for(table.table_root())
+        .build(&engine)
+        .unwrap();
+    let checkpoint = &snapshot.log_segment().listed.checkpoint_parts[0].location;
+    kernel_checkpoint_footer_schema(&engine, checkpoint, v2_checkpoint);
+    recorder.take_reads();
+
+    match write {
+        WriteFromCheckpoint::Checkpoint => assert_eq!(
+            snapshot.checkpoint(&engine, None).unwrap().0,
+            CheckpointWriteResult::Written
+        ),
+        WriteFromCheckpoint::Checksum => assert_eq!(
+            snapshot.write_checksum(&engine).unwrap().0,
+            ChecksumWriteResult::Written
+        ),
+    }
+
+    let sidecar_lookups = recorder
+        .take_read_columns()
+        .iter()
+        .filter(|columns| columns[..] == [SIDECAR_NAME])
+        .count();
+    assert_eq!(sidecar_lookups, usize::from(v2_checkpoint));
 }
 
 #[rstest]
