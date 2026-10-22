@@ -312,10 +312,7 @@ fn timestamp_from_date(days: Option<&i32>) -> Option<Scalar> {
 /// INT64 columns retain the microsecond interpretation used for external checkpoints.
 fn timestamp_stat_as_micros(value: i64, column: &ColumnDescriptor) -> Option<i64> {
     let unit = match column.logical_type_ref() {
-        #[cfg(feature = "arrow-59")]
         Some(LogicalType::Timestamp(timestamp)) => Some(&timestamp.unit),
-        #[cfg(not(feature = "arrow-59"))]
-        Some(LogicalType::Timestamp { unit, .. }) => Some(unit),
         _ => None,
     };
     match unit {
