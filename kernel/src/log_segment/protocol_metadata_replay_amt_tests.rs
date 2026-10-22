@@ -500,33 +500,34 @@ async fn plan_replay_without_pointer_skips_older_checkpoint_action() {
     assert_replay_resolution(&commits, None, |store| SyncEngine::new_with_store(store)).await;
 }
 
-// The plan path skips reading the pointed commit when the newest commit's P&M is newer than it.
-// The pointed commit here has no checkpoint action, so reading it would fail the build.
+// The plan path skips reading the pointed commit when the segment has both P&M, even at the pointed
+// version. The pointed commit here has no checkpoint action, so reading it would fail the build.
 #[cfg(feature = "declarative-plans")]
 #[tokio::test]
-async fn plan_replay_skips_pointed_commit_when_pm_is_newer() {
+async fn plan_replay_skips_pointed_commit_when_segment_has_pm() {
     let commits = [
         standalone_pm_commit(one_column_schema()),
-        carrying_pointer((0, 0), standalone_pm_commit(one_column_schema())),
+        commit_info(Some((0, 0))),
     ];
     assert_replay_resolution(&commits, None, |store| SyncEngine::new_with_store(store)).await;
 }
 
-// The plan path reads the checkpoint action from the commit `lastManifestCommit` points at, so a
-// pointed commit without a matching action (none at all, or one whose content root is at another
-// version) fails the build rather than silently dropping the action's P&M.
+// When the segment lacks Protocol or Metadata, the plan path reads the checkpoint action from the
+// commit `lastManifestCommit` points at, so a pointed commit without a matching action (none at
+// all, or one whose content root is at another version) fails the build rather than silently
+// dropping the action's P&M.
 #[cfg(feature = "declarative-plans")]
 #[rstest]
 #[case::pointed_commit_has_no_checkpoint_action(
     vec![
-        standalone_pm_commit(one_column_schema()),
+        protocol_commit(1, 2),
         commit_info(Some((0, 0))),
     ],
     "that commit carries no checkpoint action"
 )]
 #[case::pointed_action_has_other_content_root(
     vec![
-        standalone_pm_commit(one_column_schema()),
+        protocol_commit(1, 2),
         checkpoint_action(0, &[], one_column_schema()),
         commit_info(Some((1, 1))),
     ],

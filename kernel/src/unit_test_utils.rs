@@ -326,10 +326,10 @@ pub(crate) fn checkpoint_action_batch() -> Box<dyn EngineData> {
 #[cfg(feature = "adaptive-metadata-in-dev")]
 pub(crate) mod adaptive_metadata_fixtures {
     use super::*;
-    use crate::actions::{CheckpointAction, ContentRoot};
+    use crate::actions::{CheckpointAction, ContentRoot, LOG_METADATA_SCHEMA, LOG_PROTOCOL_SCHEMA};
     use crate::engine_data::FilteredEngineData;
     use crate::path::LogRoot;
-    use crate::version_as_i64;
+    use crate::{create_row, version_as_i64};
 
     /// The protocol and metadata of a minimal adaptiveMetadata table.
     pub(crate) fn adaptive_metadata_protocol_and_metadata() -> (Protocol, Metadata) {
@@ -393,7 +393,8 @@ pub(crate) mod adaptive_metadata_fixtures {
     }
 
     /// Writes a manifest commit at `version`: a `commitInfo` whose `lastManifestCommit` points at
-    /// this commit, followed by `checkpoint`, whose content root must also reflect `version`.
+    /// this commit, then `checkpoint`'s protocol and metaData as top-level actions, then
+    /// `checkpoint`, whose content root must also reflect `version`.
     pub(crate) fn write_manifest_commit(
         engine: &SyncEngine,
         table_root: &Url,
@@ -403,7 +404,24 @@ pub(crate) mod adaptive_metadata_fixtures {
         let version_i64 = version_as_i64(version)?;
         let commit_info = last_manifest_commit_info(version_i64, version_i64);
         let commit_info = parse_json_batch(vec![commit_info.to_string()].into());
-        let batches = vec![commit_info, checkpoint.into_engine_data(engine)?];
+        // A `setup_table` table starts without adaptiveMetadata, and enabling it changes the
+        // protocol, which must be written as a top-level action.
+        let protocol = create_row(
+            engine,
+            LOG_PROTOCOL_SCHEMA.clone(),
+            checkpoint.protocol().clone(),
+        )?;
+        let metadata = create_row(
+            engine,
+            LOG_METADATA_SCHEMA.clone(),
+            checkpoint.metadata().clone(),
+        )?;
+        let batches = vec![
+            commit_info,
+            protocol,
+            metadata,
+            checkpoint.into_engine_data(engine)?,
+        ];
         write_commit_batches(engine, table_root, version, batches)
     }
 

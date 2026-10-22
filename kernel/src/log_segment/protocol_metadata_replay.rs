@@ -173,13 +173,16 @@ impl LogSegment {
             return Ok(candidate);
         }
         let candidate = resolve_pm_batches(self.read_pm_batches(engine)?)?;
+        // Only a malformed log has a pointer past its own commit; reject it before it is cached.
         #[cfg(feature = "adaptive-metadata-in-dev")]
         candidate.ensure_pointer_at_or_before(self.end_version)?;
         Ok(candidate)
     }
 
     /// Merges in the checkpoint action that `lastManifestCommit` points at, unless the plan
-    /// already captured it from the newest commit.
+    /// already captured it from the newest commit. The pointed action's P&M are needed only when
+    /// the segment lacks Protocol or Metadata, e.g. when the `_last_checkpoint` hint trims the
+    /// segment and no P&M change follows the hinted commit.
     ///
     /// # Errors
     /// Returns an error if the newest commit's checkpoint action does not match its
@@ -200,12 +203,13 @@ impl LogSegment {
             candidate.checkpoint = Some((checkpoint_version, action));
             return Ok(candidate);
         }
-        // P&M newer than `pointer.version` beat the pointed action's, which are at or below it.
-        let (newer_protocol, newer_metadata) = candidate.pm_newer_than(pointer.version);
-        if newer_protocol.is_some() && newer_metadata.is_some() {
+        // P&M changes are always written as top-level actions, so the segment's own P&M are at
+        // least as new as the pointed action's.
+        if candidate.protocol.is_some() && candidate.metadata.is_some() {
             return Ok(candidate);
         }
-        // A pointed commit outside this segment is no newer than the segment's P&M.
+        // An unlisted pointed commit is at or below the CRC seeding this pruned replay, and the
+        // CRC's P&M are at least as new.
         let Some(commit) = self.find_pointed_commit(&pointer) else {
             return Ok(candidate);
         };
@@ -309,7 +313,11 @@ impl LogSegment {
         // Also keep the newest commit's checkpoint action, so a manifest commit at this version
         // needs no second read. Matching only the newest commit keeps P&M replay able to stop at
         // the newest Protocol and Metadata: matching checkpoint actions in every commit would force
-        // reading the whole log, even for tables without adaptive metadata. A segment that ends on
+        // reading the whole log, even for tables without adaptive metadata. An executor stops early
+        // only if it sees the `version` arms are false for every older file; one that does not
+        // keeps the checkpoint and commitInfo aggregates open and reads the whole log.
+        // TODO(#3674): revisit how P&M replay finds the checkpoint action for manifest commits,
+        // e.g. read the newest commit in its own plan first. A segment that ends on
         // a checkpoint does not list that commit, and its checkpoint parts carry the same version.
         // Older checkpoint actions are reached only through the newest commit's
         // `lastManifestCommit`, which writers carry forward on every commit after the first
