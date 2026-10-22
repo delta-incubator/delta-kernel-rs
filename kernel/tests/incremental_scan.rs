@@ -1335,40 +1335,106 @@ async fn incremental_scan_partition_values_options(
     Ok(())
 }
 
-// 1_705_334_400_000_000 microseconds since the Unix epoch is 2024-01-15T16:00:00Z.
+// Scan the offset-less timestamp "2024-01-15 12:30:45.123456" with different timezones and
+// predicates.
 #[rstest]
-// Under the default UTC timezone, "2024-01-15 12:30:45.123456" is interpreted as
-// 2024-01-15T12:30:45.123456Z, so the less-than predicate keeps the file.
+// Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
+// The file is expected not to be pruned.
 #[case::utc_before(
-    col!("p_ts").lt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
-    None, // timezone: default UTC
-    Ok(1) // expected surviving file count
+    col!("p_ts").lt(lit(Scalar::Timestamp(
+        1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
+    ))),
+    None /* timezone: default UTC */,
+    Ok(1) /* expected surviving file count */
 )]
-// Under the default UTC timezone, "2024-01-15 12:30:45.123456" is interpreted as
-// 2024-01-15T12:30:45.123456Z, so the greater-than predicate filters out the file.
+// Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
+// The file is expected to be pruned.
 #[case::utc_after(
-    col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
-    None, // timezone: default UTC
-    Ok(0) // expected surviving file count
+    col!("p_ts").gt(lit(Scalar::Timestamp(
+        1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
+    ))),
+    None /* timezone: default UTC */,
+    Ok(0) /* expected surviving file count */
 )]
-// Under America/Los_Angeles, "2024-01-15 12:30:45.123456" is interpreted as
-// 2024-01-15T20:30:45.123456Z, so the less-than predicate filters out the file.
+// Under America/Los_Angeles, the offset-less value is interpreted as
+// 2024-01-15T20:30:45.123456Z (UTC). The file is expected to be pruned.
 #[case::los_angeles_before(
-    col!("p_ts").lt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
-    Some("America/Los_Angeles"), // timezone
-    Ok(0) // expected surviving file count
+    col!("p_ts").lt(lit(Scalar::Timestamp(
+        1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
+    ))),
+    Some("America/Los_Angeles") /* timezone */,
+    Ok(0) /* expected surviving file count */
 )]
-// Under America/Los_Angeles, "2024-01-15 12:30:45.123456" is interpreted as
-// 2024-01-15T20:30:45.123456Z, so the greater-than predicate keeps the file.
+// Under America/Los_Angeles, the offset-less value is interpreted as
+// 2024-01-15T20:30:45.123456Z (UTC). The file is expected not to be pruned.
 #[case::los_angeles_after(
-    col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
-    Some("America/Los_Angeles"), // timezone
-    Ok(1) // expected surviving file count
+    col!("p_ts").gt(lit(Scalar::Timestamp(
+        1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
+    ))),
+    Some("America/Los_Angeles") /* timezone */,
+    Ok(1) /* expected surviving file count */
 )]
+// Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
+// The file is expected not to be pruned.
+#[case::utc_equal(
+    col!("p_ts").eq(lit(Scalar::Timestamp(
+        1_705_321_845_123_456 /* 2024-01-15T12:30:45.123456Z (UTC) */
+    ))),
+    None /* timezone: default UTC */,
+    Ok(1) /* expected surviving file count */
+)]
+// Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
+// The file is expected not to be pruned.
+#[case::utc_less_than_or_equal(
+    col!("p_ts").le(lit(Scalar::Timestamp(
+        1_705_321_845_123_456 /* 2024-01-15T12:30:45.123456Z (UTC) */
+    ))),
+    None /* timezone: default UTC */,
+    Ok(1) /* expected surviving file count */
+)]
+// Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
+// The file is expected not to be pruned.
+#[case::utc_greater_than_or_equal(
+    col!("p_ts").ge(lit(Scalar::Timestamp(
+        1_705_321_845_123_456 /* 2024-01-15T12:30:45.123456Z (UTC) */
+    ))),
+    None /* timezone: default UTC */,
+    Ok(1) /* expected surviving file count */
+)]
+// Under America/Los_Angeles, the offset-less value is interpreted as
+// 2024-01-15T20:30:45.123456Z (UTC). The file is expected not to be pruned.
+#[case::los_angeles_equal(
+    col!("p_ts").eq(lit(Scalar::Timestamp(
+        1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
+    ))),
+    Some("America/Los_Angeles") /* timezone */,
+    Ok(1) /* expected surviving file count */
+)]
+// Under America/Los_Angeles, the offset-less value is interpreted as
+// 2024-01-15T20:30:45.123456Z (UTC). The file is expected not to be pruned.
+#[case::los_angeles_less_than_or_equal(
+    col!("p_ts").le(lit(Scalar::Timestamp(
+        1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
+    ))),
+    Some("America/Los_Angeles") /* timezone */,
+    Ok(1) /* expected surviving file count */
+)]
+// Under America/Los_Angeles, the offset-less value is interpreted as
+// 2024-01-15T20:30:45.123456Z (UTC). The file is expected not to be pruned.
+#[case::los_angeles_greater_than_or_equal(
+    col!("p_ts").ge(lit(Scalar::Timestamp(
+        1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
+    ))),
+    Some("America/Los_Angeles") /* timezone */,
+    Ok(1) /* expected surviving file count */
+)]
+// Under an invalid timezone, parsing the offset-less value is expected to fail.
 #[case::invalid_timezone(
-    col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
-    Some("Not/AZone"), // timezone
-    Err("Not/AZone") // expected parsing error
+    col!("p_ts").gt(lit(Scalar::Timestamp(
+        1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
+    ))),
+    Some("Not/AZone") /* timezone */,
+    Err("Not/AZone") /* expected parsing error */
 )]
 #[tokio::test]
 async fn incremental_scan_partition_predicate_uses_timezone(
