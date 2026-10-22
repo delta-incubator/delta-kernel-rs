@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use ::test_utils::table_builder::{LogState, TestTableBuilder};
 use ::test_utils::{assert_result_error_with_message, get_column, load_test_data};
 use bytes::Bytes;
 use rstest::rstest;
@@ -31,6 +32,7 @@ use crate::schema::{
     self, schema, schema_ref, ColumnMetadataKey, DataType, MetadataColumnSpec, StructField,
     StructType,
 };
+use crate::snapshot::CheckpointWriteResult;
 use crate::transaction::create_table::create_table;
 use crate::transaction::data_layout::DataLayout;
 use crate::unit_test_utils::TestCancellationToken;
@@ -1838,6 +1840,66 @@ fn scan_execute_passes_scan_file_modification_time_to_parquet_handler() {
     expected.sort_unstable();
     actual.sort_unstable();
     assert_eq!(actual, expected);
+}
+
+#[derive(Clone, Copy)]
+enum CheckpointReadPath {
+    FreshLoad,
+    CheckpointResult,
+    IncrementalUpdate,
+    TimeTravel,
+}
+
+/// A kernel-written V1 checkpoint has an all-null `sidecar` column, but no `checkpointMetadata`
+/// column, so a scan reads it with one parquet read and no sidecar lookup.
+#[rstest]
+#[case::fresh_load_from_last_checkpoint(CheckpointReadPath::FreshLoad)]
+#[case::snapshot_returned_by_checkpoint(CheckpointReadPath::CheckpointResult)]
+#[case::incremental_update(CheckpointReadPath::IncrementalUpdate)]
+#[case::time_travel_to_checkpoint(CheckpointReadPath::TimeTravel)]
+fn scan_reads_kernel_v1_checkpoint_once(#[case] read_path: CheckpointReadPath) {
+    let table = TestTableBuilder::new()
+        .with_log_state(LogState::with_latest_version(2).with_checkpoint_at([1]))
+        .build()
+        .unwrap();
+    let sync = Arc::new(SyncEngine::new_with_store(table.store().clone()));
+    let recorder = Arc::new(RecordingParquetHandler::new(sync.parquet_handler()));
+    let engine = DelegatingEngine::new(sync).with_parquet_handler(recorder.clone());
+    let table_root = table.table_root();
+    let snapshot = match read_path {
+        CheckpointReadPath::FreshLoad => Snapshot::builder_for(table_root).build(&engine).unwrap(),
+        CheckpointReadPath::CheckpointResult => {
+            let latest = Snapshot::builder_for(table_root).build(&engine).unwrap();
+            let (result, checkpointed) = latest.checkpoint(&engine, None).unwrap();
+            assert_eq!(result, CheckpointWriteResult::Written);
+            checkpointed
+        }
+        CheckpointReadPath::IncrementalUpdate => {
+            let base = Snapshot::builder_for(table_root)
+                .at_version(0)
+                .build(&engine)
+                .unwrap();
+            Snapshot::builder_from(base).build(&engine).unwrap()
+        }
+        CheckpointReadPath::TimeTravel => Snapshot::builder_for(table_root)
+            .at_version(1)
+            .build(&engine)
+            .unwrap(),
+    };
+    assert!(snapshot.log_segment().checkpoint_version.is_some());
+    recorder.take_reads();
+
+    let scan = snapshot.scan_builder().build().unwrap();
+    for scan_metadata in scan.scan_metadata(&engine).unwrap() {
+        scan_metadata.unwrap();
+    }
+
+    let read_columns: Vec<Vec<String>> = recorder
+        .take_reads()
+        .iter()
+        .map(|read| read.physical_schema.field_names().cloned().collect())
+        .collect();
+    assert_eq!(read_columns, [[ADD_NAME]]);
 }
 
 #[rstest]

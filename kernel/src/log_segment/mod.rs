@@ -10,8 +10,8 @@ use url::Url;
 
 use crate::actions::visitors::SidecarVisitor;
 use crate::actions::{
-    action_presence_leaf, schema_contains_file_actions, Sidecar, LOG_ADD_SCHEMA,
-    SIDECAR_FILE_SCHEMA_TAG, SIDECAR_NAME,
+    action_presence_leaf, schema_contains_file_actions, Sidecar, CHECKPOINT_METADATA_NAME,
+    LOG_ADD_SCHEMA, SIDECAR_FILE_SCHEMA_TAG, SIDECAR_NAME,
 };
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::actions::{CheckpointAction, LastManifestCommit, LOG_CHECKPOINT_SCHEMA};
@@ -1132,9 +1132,10 @@ impl LogSegment {
     /// - Multi-part (always V1, no sidecars): return checkpoint schema directly
     /// - UUID-named JSON (always V2): extract sidecars, read first sidecar's schema
     /// - Classic-named or UUID-named parquet (V1 or V2): read checkpoint schema from hint or
-    ///   footer, then check for sidecar column to distinguish
-    ///   - Has sidecar column (V2): extract sidecars, read first sidecar's schema
-    ///   - No sidecar column (V1): use checkpoint schema directly
+    ///   footer, then check whether it can reference sidecars (see
+    ///   [`Self::schema_may_reference_sidecars`])
+    ///   - Can reference sidecars (V2): extract sidecars, read first sidecar's schema
+    ///   - Cannot reference sidecars: use checkpoint schema directly
     fn get_file_actions_schema_and_sidecars(
         &self,
         engine: &dyn Engine,
@@ -1167,14 +1168,13 @@ impl LogSegment {
             }
             ClassicCheckpoint | UuidCheckpoint if checkpoint.extension.as_str() == "parquet" => {
                 // Parquet checkpoint (classic-named or UUID-named): either can be V1 or V2.
-                // Check for sidecar column to distinguish.
                 let checkpoint_schema = Self::read_checkpoint_schema(
                     engine,
                     checkpoint,
                     hint_schema.as_ref(),
                     cancellation_token,
                 )?;
-                if checkpoint_schema.field(SIDECAR_NAME).is_some() {
+                if Self::schema_may_reference_sidecars(&checkpoint_schema) {
                     self.read_sidecar_schema_and_files(
                         engine,
                         checkpoint,
@@ -1571,6 +1571,15 @@ impl LogSegment {
         static SIDECAR_SCHEMA: LazyLock<SchemaRef> =
             lazy_schema_ref! { nullable SIDECAR_NAME: (Sidecar::to_schema()) };
         SIDECAR_SCHEMA.clone()
+    }
+
+    /// Whether a parquet checkpoint with this schema can reference sidecar files. Only V2 spec
+    /// checkpoints may hold `sidecar` actions, and each one holds a `checkpointMetadata` action, so
+    /// a checkpoint without a `checkpointMetadata` column cannot. A V1 spec checkpoint can still
+    /// have an all-null `sidecar` column.
+    pub(crate) fn schema_may_reference_sidecars(checkpoint_schema: &StructType) -> bool {
+        checkpoint_schema.contains(SIDECAR_NAME)
+            && checkpoint_schema.contains(CHECKPOINT_METADATA_NAME)
     }
 
     fn get_field_from_add<'a>(

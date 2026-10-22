@@ -118,8 +118,8 @@ impl CheckpointShape {
                     Some(schema) => schema,
                     None => read_parquet_footer_schema(exec, root_checkpoint.clone())?,
                 };
-                // No `sidecar` column means the file actions are inline, so this is a leaf.
-                if !cp_schema.contains(SIDECAR_NAME) {
+                // A checkpoint that cannot reference sidecars holds its file actions inline.
+                if !LogSegment::schema_may_reference_sidecars(&cp_schema) {
                     return Ok(Self::new_leaf(needs_leaf_schema.then_some(cp_schema)));
                 }
                 // The `sidecar` column may still be all-null (not a manifest), so scan it to
@@ -313,6 +313,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rstest::rstest;
+    use test_utils::table_builder::{FeatureSet, LogState, TestTableBuilder};
 
     use super::*;
     use crate::actions::{
@@ -340,8 +341,12 @@ mod tests {
 
     impl CountingExecutor {
         fn new() -> Self {
+            Self::wrapping(SyncPlanExecutor::default())
+        }
+
+        fn wrapping(inner: SyncPlanExecutor) -> Self {
             Self {
-                inner: SyncPlanExecutor::default(),
+                inner,
                 query_scans: AtomicUsize::new(0),
                 footer_reads: AtomicUsize::new(0),
             }
@@ -605,6 +610,32 @@ mod tests {
                 .is_some(),
             expect_parsed_stats
         );
+    }
+
+    /// Kernel writes an all-null `sidecar` column into V1 and V2 checkpoints, but only V2
+    /// checkpoints have a `checkpointMetadata` column.
+    #[rstest]
+    #[case::v1(FeatureSet::new(), 0)]
+    #[case::v2(FeatureSet::new().v2_checkpoint(), 1)]
+    fn kernel_checkpoint_drains_sidecar_column_only_if_v2(
+        #[case] features: FeatureSet,
+        #[case] expected_drains: usize,
+    ) {
+        let table = TestTableBuilder::new()
+            .with_log_state(LogState::with_latest_version(1).with_checkpoint_at([1]))
+            .with_features(features)
+            .build()
+            .unwrap();
+        let engine = SyncEngine::new_with_store(table.store().clone());
+        let snapshot = Snapshot::builder_for(table.table_root())
+            .build(&engine)
+            .unwrap();
+        let exec = CountingExecutor::wrapping(SyncPlanExecutor::new(Some(table.store().clone())));
+
+        let shape = CheckpointShape::try_new(&exec, snapshot.as_ref()).unwrap();
+
+        assert_eq!(shape.checkpoint_type, CheckpointType::Leaf);
+        assert_eq!(exec.query_scans.load(Ordering::Relaxed), expected_drains);
     }
 
     /// Builds a `LogSegment` whose applicable hint carries `v2Checkpoint.sidecarFiles == Some([])`
