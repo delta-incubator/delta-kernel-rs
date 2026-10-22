@@ -1323,7 +1323,7 @@ pub(crate) fn load_test_table(
 }
 
 /// Builds an in-memory table with commits 0 to 2 and a checkpoint at version 1 that kernel wrote,
-/// with the `v2Checkpoint` feature if `v2_checkpoint`.
+/// with the `v2Checkpoint` feature (so a V2 checkpoint without sidecars) if `v2_checkpoint`.
 pub(crate) fn kernel_checkpoint_table(v2_checkpoint: bool) -> TestTable {
     let features = FeatureSet::empty();
     TestTableBuilder::new()
@@ -1337,13 +1337,14 @@ pub(crate) fn kernel_checkpoint_table(v2_checkpoint: bool) -> TestTable {
         .unwrap()
 }
 
-/// Reads the footer schema of a checkpoint that kernel wrote, and asserts that it has a `sidecar`
-/// column, and a `checkpointMetadata` column only if `v2_checkpoint`.
-pub(crate) fn kernel_checkpoint_footer_schema(
+/// Asserts that the footer schema of the snapshot's checkpoint, which kernel wrote, has a `sidecar`
+/// column, and a `checkpointMetadata` column only if `v2_checkpoint`. Returns the footer schema.
+pub(crate) fn assert_kernel_checkpoint_schema(
     engine: &dyn Engine,
-    checkpoint: &FileMeta,
+    snapshot: &Snapshot,
     v2_checkpoint: bool,
 ) -> SchemaRef {
+    let checkpoint = &snapshot.log_segment().listed.checkpoint_parts[0].location;
     let schema = engine
         .parquet_handler()
         .read_parquet_footer(checkpoint)

@@ -326,8 +326,8 @@ mod tests {
     use crate::plans::{IoOperation, PlanResult};
     use crate::schema::{schema, schema_ref};
     use crate::unit_test_utils::{
-        copy_test_table, create_log_path, create_log_path_with_size,
-        kernel_checkpoint_footer_schema, kernel_checkpoint_table, load_test_table,
+        assert_kernel_checkpoint_schema, copy_test_table, create_log_path,
+        create_log_path_with_size, kernel_checkpoint_table, load_test_table,
     };
     use crate::KernelResult;
 
@@ -340,10 +340,10 @@ mod tests {
 
     impl CountingExecutor {
         fn new() -> Self {
-            Self::wrapping(SyncPlanExecutor::default())
+            Self::with_inner(SyncPlanExecutor::default())
         }
 
-        fn wrapping(inner: SyncPlanExecutor) -> Self {
+        fn with_inner(inner: SyncPlanExecutor) -> Self {
             Self {
                 inner,
                 query_scans: AtomicUsize::new(0),
@@ -639,13 +639,12 @@ mod tests {
         let snapshot = Snapshot::builder_for(table.table_root())
             .build(&engine)
             .unwrap();
-        let checkpoint = &snapshot.log_segment().listed.checkpoint_parts[0].location;
-        let footer_schema = kernel_checkpoint_footer_schema(&engine, checkpoint, v2_checkpoint);
+        let footer_schema = assert_kernel_checkpoint_schema(&engine, &snapshot, v2_checkpoint);
         let mut log_segment = snapshot.log_segment().clone();
         let hint = log_segment.last_checkpoint_metadata.as_mut().unwrap();
         hint.checkpoint_schema = schema_from_hint.then_some(footer_schema);
         let snapshot = Snapshot::new(log_segment, snapshot.table_configuration().clone()).unwrap();
-        let exec = CountingExecutor::wrapping(SyncPlanExecutor::new(Some(table.store().clone())));
+        let exec = CountingExecutor::with_inner(SyncPlanExecutor::new(Some(table.store().clone())));
 
         let shape = CheckpointShape::try_new(&exec, &snapshot).unwrap();
 

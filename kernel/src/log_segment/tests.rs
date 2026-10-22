@@ -3758,7 +3758,7 @@ async fn test_sidecar_lookup_requires_checkpoint_metadata_column(
     let sidecar_name = "sidecarfile1.parquet";
     let sidecar = add_sidecar_to_store(
         &store,
-        add_batch_simple(get_commit_schema().project(&[ADD_NAME, REMOVE_NAME])?),
+        add_batch_simple(COMMIT_READ_SCHEMA.clone()),
         sidecar_name,
     )
     .await?;

@@ -36,7 +36,7 @@ use crate::snapshot::{CheckpointWriteResult, ChecksumWriteResult};
 use crate::transaction::create_table::create_table;
 use crate::transaction::data_layout::DataLayout;
 use crate::unit_test_utils::{
-    kernel_checkpoint_footer_schema, kernel_checkpoint_table, TestCancellationToken,
+    assert_kernel_checkpoint_schema, kernel_checkpoint_table, TestCancellationToken,
 };
 use crate::{
     CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
@@ -1876,17 +1876,16 @@ fn scan_looks_up_kernel_checkpoint_sidecars_only_if_v2(
         CheckpointReadPath::Load(target) => build_snapshot!(target, table_root, &engine),
         CheckpointReadPath::CheckpointResult => {
             let latest = Snapshot::builder_for(table_root).build(&engine).unwrap();
-            latest.checkpoint(&engine, None).unwrap().1
+            let (result, checkpointed) = latest.checkpoint(&engine, None).unwrap();
+            assert_eq!(result, CheckpointWriteResult::Written);
+            checkpointed
         }
     };
-    let checkpoint = &snapshot.log_segment().listed.checkpoint_parts[0].location;
-    kernel_checkpoint_footer_schema(&engine, checkpoint, v2_checkpoint);
+    assert_kernel_checkpoint_schema(&engine, &snapshot, v2_checkpoint);
     recorder.take_reads();
 
     let scan = snapshot.scan_builder().build().unwrap();
-    for scan_metadata in scan.scan_metadata(&engine).unwrap() {
-        scan_metadata.unwrap();
-    }
+    let _: Vec<_> = scan.scan_metadata(&engine).unwrap().try_collect().unwrap();
 
     let expected_reads: &[&[&str]] = if v2_checkpoint {
         &[&[SIDECAR_NAME], &[ADD_NAME]]
@@ -1915,8 +1914,7 @@ fn writes_look_up_kernel_checkpoint_sidecars_only_if_v2(
     let snapshot = Snapshot::builder_for(table.table_root())
         .build(&engine)
         .unwrap();
-    let checkpoint = &snapshot.log_segment().listed.checkpoint_parts[0].location;
-    kernel_checkpoint_footer_schema(&engine, checkpoint, v2_checkpoint);
+    assert_kernel_checkpoint_schema(&engine, &snapshot, v2_checkpoint);
     recorder.take_reads();
 
     match write {
