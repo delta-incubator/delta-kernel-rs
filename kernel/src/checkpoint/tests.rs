@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use serde_json::{from_slice, json, Value};
 use tempfile::tempdir;
-#[cfg(feature = "adaptive-metadata-in-dev")]
-use test_utils::assert_result_error_with_message;
-use test_utils::{actions_to_string, add_commit, delta_path_for_version, TestAction};
+use test_utils::{
+    actions_to_string, add_commit, assert_result_error_with_message, delta_path_for_version,
+    TestAction,
+};
 use url::Url;
 
 use crate::action_reconciliation::{
@@ -22,11 +23,13 @@ use crate::checkpoint::{CheckpointWriter, LastCheckpointHintStats, CHECKPOINT_AC
 use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use crate::engine::sync::SyncEngine;
+use crate::engine::test_delegating::DelegatingEngine;
 use crate::log_replay::HasSelectionVector;
 use crate::object_store::memory::InMemory;
 use crate::object_store::path::Path;
 use crate::object_store::ObjectStoreExt as _;
 use crate::schema::{schema_ref, DataType as KernelDataType, SchemaRef, StructField};
+use crate::snapshot::CheckpointWriteResult;
 use crate::table_features::TableFeature;
 use crate::transaction::create_table::create_table;
 use crate::transaction::UpdateTableOperation;
@@ -35,7 +38,10 @@ use crate::unit_test_utils::Action;
 use crate::unit_test_utils::{
     adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
 };
-use crate::{FileMeta, KernelResult, LogPath, Snapshot};
+use crate::{
+    Engine, FileMeta, FileSlice, KernelError, KernelResult, KernelResultIteratorStatic, LogPath,
+    Snapshot, StorageHandler,
+};
 
 #[rstest::rstest]
 #[case::default_retention(
@@ -192,7 +198,7 @@ pub(super) async fn write_commit_to_store(
 }
 
 /// Create a Protocol action without v2Checkpoint feature support
-fn create_basic_protocol_action() -> Action {
+pub(super) fn create_basic_protocol_action() -> Action {
     Action::Protocol(
         Protocol::try_new_modern(TableFeature::EMPTY_LIST, TableFeature::EMPTY_LIST).unwrap(),
     )
@@ -1033,6 +1039,113 @@ async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer(
     let segment = checkpointed_v1.log_segment();
     assert_eq!(segment.last_checkpoint_version(), Some(2));
     assert!(segment.checkpoint_hint().is_none());
+    Ok(())
+}
+
+/// An update of a time-travel checkpoint result keeps the newer hint, so its checkpoint does not
+/// regress `_last_checkpoint` either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_checkpoint_after_skipped_last_checkpoint_write_keeps_newer_hint() -> KernelResult<()>
+{
+    let (store, _) = new_in_memory_store();
+    let engine = SyncEngine::new_with_store(store.clone());
+    let table_root = Url::parse("memory:///")?;
+    let _ = create_table(
+        table_root.as_str(),
+        schema_ref! { nullable "value": INTEGER },
+        "test",
+        true,
+    )
+    .build(&engine, Box::new(FileSystemCommitter::new()))?
+    .commit(&engine)?;
+    for version in 1..=3 {
+        add_commit(
+            table_root.as_str(),
+            store.as_ref(),
+            version,
+            actions_to_string(vec![TestAction::Add(format!("file{version}.parquet"))]),
+        )
+        .await
+        .map_err(|err| KernelError::generic(err.to_string()))?;
+    }
+    Snapshot::builder_for(table_root.clone())
+        .build(&engine)?
+        .checkpoint(&engine, None)?;
+    let hint_at_version_3 = read_last_checkpoint_file(&store).await?;
+
+    let (_, checkpointed_v1) = Snapshot::builder_for(table_root)
+        .at_version(1)
+        .build(&engine)?
+        .checkpoint(&engine, None)?;
+    let (result, _) = Snapshot::builder_from(checkpointed_v1)
+        .at_version(2)
+        .build(&engine)?
+        .checkpoint(&engine, None)?;
+
+    assert_eq!(result, CheckpointWriteResult::Written);
+    assert_eq!(read_last_checkpoint_file(&store).await?, hint_at_version_3);
+    Ok(())
+}
+
+/// Delegates to the inner handler, but fails to write `_last_checkpoint`.
+struct FailingLastCheckpointWrite(Arc<dyn StorageHandler>);
+
+impl StorageHandler for FailingLastCheckpointWrite {
+    fn list_from(&self, path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
+        self.0.list_from(path)
+    }
+    fn read_files(
+        &self,
+        files: Vec<FileSlice>,
+    ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
+        self.0.read_files(files)
+    }
+    fn copy_atomic(&self, src: &Url, dest: &Url) -> KernelResult<()> {
+        self.0.copy_atomic(src, dest)
+    }
+    fn put(&self, path: &Url, data: bytes::Bytes, overwrite: bool) -> KernelResult<()> {
+        if path.path().ends_with("/_last_checkpoint") {
+            return Err(KernelError::generic(
+                "injected _last_checkpoint write failure",
+            ));
+        }
+        self.0.put(path, data, overwrite)
+    }
+    fn head(&self, path: &Url) -> KernelResult<FileMeta> {
+        self.0.head(path)
+    }
+    fn delete(&self, path: &Url) -> KernelResult<()> {
+        self.0.delete(path)
+    }
+}
+
+/// A failed `_last_checkpoint` write fails the checkpoint and leaves the checkpoint file without a
+/// hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_checkpoint_fails_when_last_checkpoint_write_fails() -> KernelResult<()> {
+    let (store, _) = new_in_memory_store();
+    let sync_engine = Arc::new(SyncEngine::new_with_store(store.clone()));
+    write_commit_to_store(
+        &store,
+        vec![create_metadata_action(), create_basic_protocol_action()],
+        0,
+    )
+    .await?;
+    write_commit_to_store(&store, vec![create_add_action("file1.parquet")], 1).await?;
+    let engine = DelegatingEngine::new(sync_engine.clone()).with_storage_handler(Arc::new(
+        FailingLastCheckpointWrite(sync_engine.storage_handler()),
+    ));
+    let table_root = Url::parse("memory:///")?;
+    let snapshot = Snapshot::builder_for(table_root.clone()).build(&engine)?;
+
+    assert_result_error_with_message(
+        snapshot.checkpoint(&engine, None),
+        "injected _last_checkpoint write failure",
+    );
+
+    let snapshot = Snapshot::builder_for(table_root).build(sync_engine.as_ref())?;
+    assert_eq!(snapshot.log_segment().checkpoint_version, Some(1));
+    assert!(snapshot.log_segment().last_checkpoint_metadata.is_none());
     Ok(())
 }
 
