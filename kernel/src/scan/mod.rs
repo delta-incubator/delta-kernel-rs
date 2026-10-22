@@ -38,6 +38,8 @@ use crate::scan::log_replay::{
 };
 use crate::scan::metrics::ScanMetrics;
 use crate::scan::state_info::StateInfo;
+#[cfg(feature = "udt-in-dev")]
+use crate::schema::UserDefinedType;
 use crate::schema::{
     lazy_schema_ref, schema_ref, ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef,
     StructField, StructType, ToSchema as _,
@@ -745,20 +747,17 @@ impl<'a> SchemaTransform<'a> for GetReferencedFields<'a> {
 
     // Capture the path mapping for this leaf field
     fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> Option<Cow<'a, PrimitiveType>> {
-        // Record the physical name mappings for all referenced leaf columns. Delta column names
-        // are case-insensitive, so we probe the case-folded lookup map for O(1) matching.
-        let pred_cols = self
-            .folded_references
-            .remove(self.folded_logical_path.as_slice())?;
-        let physical = ColumnName::new(&self.physical_path);
-        for pred_col in pred_cols {
-            self.unresolved_references.remove(pred_col);
-            // Use the predicate's column name as key so ApplyColumnMappings can look it up
-            // by the exact name used in the predicate expression.
-            self.column_mappings
-                .insert(pred_col.clone(), physical.clone());
-        }
+        self.record_leaf()?;
         Some(Cow::Borrowed(ptype))
+    }
+
+    #[cfg(feature = "udt-in-dev")]
+    fn transform_user_defined(
+        &mut self,
+        udt: &'a UserDefinedType,
+    ) -> Option<Cow<'a, UserDefinedType>> {
+        self.record_leaf()?;
+        Some(Cow::Borrowed(udt))
     }
 
     // array and map fields are not eligible for data skipping, so filter them out.
@@ -779,6 +778,23 @@ impl<'a> SchemaTransform<'a> for GetReferencedFields<'a> {
         self.folded_logical_path.pop();
         self.physical_path.pop();
         Some(Cow::Owned(field?.with_name(physical_name)))
+    }
+}
+
+impl GetReferencedFields<'_> {
+    fn record_leaf(&mut self) -> Option<()> {
+        // ApplyColumnMappings looks up the predicate's exact spelling after case-insensitive
+        // resolution, so each spelling must remain a key in column_mappings.
+        let pred_cols = self
+            .folded_references
+            .remove(self.folded_logical_path.as_slice())?;
+        let physical = ColumnName::new(&self.physical_path);
+        for pred_col in pred_cols {
+            self.unresolved_references.remove(pred_col);
+            self.column_mappings
+                .insert(pred_col.clone(), physical.clone());
+        }
+        Some(())
     }
 }
 
@@ -1416,6 +1432,9 @@ impl Scan {
             &partition_columns,
             &floating_partition_columns,
             &self.state_info.eligible_physical_stats_columns,
+            self.state_info
+                .physical_stats_read_schema()
+                .map(AsRef::as_ref),
         )?;
 
         let mut prefixer = PrefixColumns {
