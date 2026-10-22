@@ -40,6 +40,8 @@ use crate::{
     Snapshot,
 };
 
+#[cfg(feature = "adaptive-metadata-in-dev")]
+mod adaptive_metadata;
 #[cfg(feature = "geo-type-in-dev")]
 mod geometry_stats;
 mod variant_stats;
