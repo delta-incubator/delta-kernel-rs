@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::arrow::array::{Array as _, ArrayRef, Int64Array, RecordBatch};
+use crate::arrow::array::{Array as _, Int64Array, RecordBatch};
 use crate::arrow::datatypes::Schema as ArrowSchema;
 use crate::engine::arrow_conversion::TryFromKernel as _;
 use crate::plans::ir::nodes::PrefixSum;
@@ -40,7 +40,7 @@ pub(super) fn eval_prefix_sum(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arrow::array::StringArray;
+    use crate::arrow::array::{ArrayRef, StringArray};
     use crate::arrow::util::pretty::pretty_format_batches;
     use crate::expressions::column_name;
     use crate::schema::schema_ref;

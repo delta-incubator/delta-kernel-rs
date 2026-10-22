@@ -610,13 +610,14 @@ impl LogSegment {
         }
 
         // TODO: compactions?
+        // Inherit any cancellation token bound to `storage`.
         let listed_files = LogSegmentFiles::list_commits(
             storage,
             &log_root,
             log_tail,
             Some(start_version),
             end_version,
-            None, // table-changes does not thread a cancellation token
+            None,
         )?;
         // - Here check that the start version is correct.
         // - [`LogSegment::try_new`] will verify that the `end_version` is correct if present.
@@ -657,13 +658,14 @@ impl LogSegment {
 
         // this is a list of commits with possible gaps, we want to take the latest contiguous
         // chunk of commits
+        // Inherit any cancellation token bound to `storage`.
         let mut listed_commits = LogSegmentFiles::list_commits(
             storage,
             &log_root,
             log_tail,
             start_from,
             Some(end_version),
-            None, // timestamp conversion does not thread a cancellation token
+            None,
         )?;
         if listed_commits.ascending_commit_files().is_empty() {
             return Err(KernelError::EmptyLog);

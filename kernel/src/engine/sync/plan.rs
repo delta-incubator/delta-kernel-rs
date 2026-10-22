@@ -1,11 +1,8 @@
-//! A synchronous, test-only [`PlanExecutor`] backed by [`SyncEngine`] handlers.
+//! A synchronous [`PlanExecutor`] for tests, backed by the sync storage helpers.
 //!
-//! Wired into [`SyncEngine::plan_executor`]. The query path evaluates a [`Plan`] eagerly,
-//! materializing every node's output in full before its consumers run. Streaming is not needed
-//! because this executor only serves tests, which never approach memory limits.
-//!
-//! [`SyncEngine`]: super::SyncEngine
-//! [`SyncEngine::plan_executor`]: super::SyncEngine
+//! The query path evaluates a [`Plan`] eagerly, materializing every node's output in full before
+//! its consumers run. Streaming is not needed because this executor only serves tests, which never
+//! approach memory limits.
 //
 // TODO: The `IoOperation` paths will eventually be used to replace SyncEngine with an
 // PlanBasedEngine (backed by this PlanExecutor)
@@ -50,10 +47,8 @@ use crate::{
 
 /// A synchronous, test-only [`PlanExecutor`].
 ///
-/// Scans read files directly through the sync module's Arrow read core ([`read_files_arrow`],
-/// [`parquet_footer`]) that backs the [`JsonHandler`] / [`ParquetHandler`] traits, so those
-/// handlers can eventually be retired in favor of declarative plans. [`IoOperation`]s still
-/// delegate to [`SyncStorageHandler`].
+/// Scans read files through the sync module's Arrow read core, which also backs the
+/// [`JsonHandler`] and [`ParquetHandler`] traits. [`IoOperation`]s use the sync storage handler.
 ///
 /// All I/O is performed synchronously via [`futures::executor::block_on`]; cloud-backed stores are
 /// not supported (see [`super`] module docs).
@@ -61,7 +56,7 @@ use crate::{
 /// [`JsonHandler`]: crate::JsonHandler
 /// [`ParquetHandler`]: crate::ParquetHandler
 #[derive(Clone)]
-pub(crate) struct SyncPlanExecutor {
+pub struct SyncPlanExecutor {
     storage: Arc<SyncStorageHandler>,
 }
 
@@ -69,7 +64,7 @@ pub(crate) struct SyncPlanExecutor {
 static NEXT_RELATION_ID: AtomicU64 = AtomicU64::new(0);
 
 /// A synchronous plan executor that retains relations for its own lifetime.
-pub(crate) struct ScopedSyncPlanExecutor {
+pub struct ScopedSyncPlanExecutor {
     executor: SyncPlanExecutor,
     relation_store: RelationStore,
 }
@@ -85,14 +80,14 @@ impl SyncPlanExecutor {
     /// Create a `SyncPlanExecutor` over `store`, or over a per-URL [`LocalFileSystem`] when `None`.
     ///
     /// [`LocalFileSystem`]: crate::object_store::local::LocalFileSystem
-    pub(crate) fn new(store: Option<Arc<DynObjectStore>>) -> Self {
+    pub fn new(store: Option<Arc<DynObjectStore>>) -> Self {
         Self {
             storage: Arc::new(SyncStorageHandler::new(store)),
         }
     }
 
     /// Returns an executor that retains relations until the scope is dropped.
-    pub(crate) fn get_scoped(&self) -> ScopedSyncPlanExecutor {
+    pub fn get_scoped(&self) -> ScopedSyncPlanExecutor {
         ScopedSyncPlanExecutor {
             executor: self.clone(),
             relation_store: Mutex::new(HashMap::new()),
@@ -105,7 +100,7 @@ impl ScopedSyncPlanExecutor {
     /// `name` is prepended to the relation ID as a debug hint.
     ///
     /// Returns an error if `schema` differs from the batch schema or retention fails.
-    pub(crate) fn create_ref(
+    pub fn create_ref(
         &self,
         name: &str,
         schema: SchemaRef,

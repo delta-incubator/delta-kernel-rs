@@ -19,18 +19,20 @@ use crate::crc::{
     try_read_crc_file, Crc, DomainMetadataState, FileSizeHistogram, SetTransactionState,
 };
 use crate::engine::sync::SyncEngine;
+use crate::engine::CancellableEngine;
 use crate::object_store::memory::InMemory;
 use crate::object_store::ObjectStoreExt as _;
 use crate::path::ParsedLogPath;
 use crate::snapshot::{IncrementalReplay, SnapshotBuilder, SnapshotRef};
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::table_features::TableFeature;
+use crate::unit_test_utils::TestCancellationToken;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::unit_test_utils::{
     adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
 };
 use crate::utils::FoldWithOption as _;
-use crate::{Engine, KernelResult, Snapshot, Version};
+use crate::{Engine, KernelError, KernelResult, Snapshot, Version};
 
 // ============================================================================
 // Expected values
@@ -418,9 +420,10 @@ impl BuiltCrcTest {
         log_segment.build_crc_from_base(&self.engine, base)
     }
 
-    /// Run `pick_latest_base_crc` against a directly-listed `LogSegment`, using `in_memory_base`.
+    /// List with the fixture engine, then read the CRC with `engine` and `in_memory_base`.
     fn pick_latest_base_crc(
         &self,
+        engine: &dyn Engine,
         in_memory_base: Option<&Arc<Crc>>,
     ) -> KernelResult<Option<Version>> {
         let storage = self.engine.storage_handler();
@@ -428,7 +431,7 @@ impl BuiltCrcTest {
         let log_segment =
             LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)?;
         Ok(log_segment
-            .pick_latest_base_crc(&self.engine, in_memory_base)
+            .pick_latest_base_crc(engine, in_memory_base)?
             .map(|c| c.version))
     }
 
@@ -521,7 +524,7 @@ impl BuiltCrcTest {
         let log_segment =
             LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)
                 .unwrap();
-        let crc = log_segment.read_latest_crc(&self.engine);
+        let crc = log_segment.read_latest_crc(&self.engine).unwrap();
         log_segment
             .read_protocol_metadata_opt(&self.engine, crc.as_ref())
             .unwrap()
@@ -1456,6 +1459,36 @@ async fn test_stale_crc_advances_past_foreign_last_manifest_commit() {
     assert_eq!(snapshot.crc_at_version().map(|c| c.version), Some(1));
 }
 
+#[rstest]
+#[tokio::test]
+async fn pick_latest_base_crc_preserves_cancellation_with_in_memory_base(
+    #[values(false, true)] corrupt: bool,
+    #[values(false, true)] cancelled: bool,
+) {
+    let test = CrcReadTest::new()
+        .commit(0, create_table_actions())
+        .crc(0, protocol_a(), metadata_a(), None)
+        .commit(1, [commit_info(DEFAULT_OPERATION, None)]);
+    let test = if corrupt {
+        test.corrupt_crc(1)
+    } else {
+        test.crc(1, protocol_a(), metadata_a(), None)
+    };
+    let built = test.build().await;
+    let base = Arc::new(built.read_crc_at(0).unwrap());
+    let token = Arc::new(TestCancellationToken::default());
+    if cancelled {
+        token.cancel();
+    }
+    let engine = CancellableEngine::new(&built.engine, token);
+    let result = built.pick_latest_base_crc(&engine, Some(&base));
+    if cancelled {
+        assert!(matches!(result, Err(KernelError::Cancelled)), "{result:?}");
+    } else {
+        assert_eq!(result.unwrap(), Some(if corrupt { 0 } else { 1 }));
+    }
+}
+
 // A base exactly at the checkpoint version is kept (its tail is (ckpt, end]); a base below it is
 // dropped. Guards the `>=` vs `>` seam in `pick_latest_base_crc`.
 #[tokio::test]
@@ -1474,12 +1507,16 @@ async fn test_pick_latest_base_crc_keeps_base_at_checkpoint_drops_below() {
         ..Default::default()
     });
     assert_eq!(
-        built.pick_latest_base_crc(Some(&base_at_ckpt)).unwrap(),
+        built
+            .pick_latest_base_crc(&built.engine, Some(&base_at_ckpt))
+            .unwrap(),
         Some(2),
         "a base exactly at the checkpoint version must be retained"
     );
     assert_eq!(
-        built.pick_latest_base_crc(Some(&base_below_ckpt)).unwrap(),
+        built
+            .pick_latest_base_crc(&built.engine, Some(&base_below_ckpt))
+            .unwrap(),
         None,
         "a base below the checkpoint version must be dropped"
     );
