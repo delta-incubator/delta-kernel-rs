@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use serde_json::{from_slice, json, Value};
 use tempfile::tempdir;
-#[cfg(feature = "adaptive-metadata-in-dev")]
-use test_utils::assert_result_error_with_message;
-use test_utils::{actions_to_string, add_commit, delta_path_for_version, TestAction};
+use test_utils::{
+    actions_to_string, add_commit, assert_result_error_with_message, delta_path_for_version,
+    TestAction,
+};
 use url::Url;
 
 use crate::action_reconciliation::{
@@ -14,24 +15,21 @@ use crate::action_reconciliation::{
     ActionReconciliationIteratorState, DEFAULT_RETENTION_SECS,
 };
 use crate::actions::{Add, Metadata, Protocol, Remove};
-use crate::arrow::array::{
-    create_array, Array, AsArray, Int64Array, MapArray, RecordBatch, StructArray,
-};
-use crate::arrow::datatypes::{DataType, Field, Schema};
-use crate::checkpoint::{
-    create_last_checkpoint_data, CheckpointWriter, LastCheckpointHintStats,
-    CHECKPOINT_ACTIONS_SCHEMA_V2,
-};
+use crate::arrow::array::{Array, AsArray, Int64Array, MapArray, StructArray};
+use crate::arrow::datatypes::{DataType, Schema};
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::checkpoint::{CheckpointSpec, V2CheckpointConfig};
+use crate::checkpoint::{CheckpointWriter, LastCheckpointHintStats, CHECKPOINT_ACTIONS_SCHEMA_V2};
 use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use crate::engine::sync::SyncEngine;
+use crate::engine::test_delegating::DelegatingEngine;
 use crate::log_replay::HasSelectionVector;
 use crate::object_store::memory::InMemory;
 use crate::object_store::path::Path;
 use crate::object_store::ObjectStoreExt as _;
-use crate::schema::{schema_ref, DataType as KernelDataType, StructField};
+use crate::schema::{schema_ref, DataType as KernelDataType, SchemaRef, StructField};
+use crate::snapshot::CheckpointWriteResult;
 use crate::table_features::TableFeature;
 use crate::transaction::create_table::create_table;
 use crate::transaction::UpdateTableOperation;
@@ -40,7 +38,10 @@ use crate::unit_test_utils::Action;
 use crate::unit_test_utils::{
     adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
 };
-use crate::{FileMeta, KernelResult, LogPath, Snapshot};
+use crate::{
+    Engine, FileMeta, FileSlice, KernelError, KernelResult, KernelResultIteratorStatic, LogPath,
+    Snapshot, StorageHandler,
+};
 
 #[rstest::rstest]
 #[case::default_retention(
@@ -166,52 +167,6 @@ async fn test_create_checkpoint_metadata_batch() -> KernelResult<()> {
     Ok(())
 }
 
-#[test]
-fn test_create_last_checkpoint_data() -> KernelResult<()> {
-    let version = 10;
-    let total_actions_counter = 100;
-    let add_actions_counter = 75;
-    let size_in_bytes: i64 = 1024 * 1024; // 1MB
-    let (store, _) = new_in_memory_store();
-    let engine = SyncEngine::new_with_store(store.clone());
-
-    // Create last checkpoint metadata
-    let last_checkpoint_batch = create_last_checkpoint_data(
-        &engine,
-        version,
-        total_actions_counter,
-        add_actions_counter,
-        size_in_bytes,
-    )?;
-
-    // Verify the underlying EngineData contains the expected `LastCheckpointInfo` schema and data
-    let arrow_engine_data = ArrowEngineData::try_from_engine_data(last_checkpoint_batch)?;
-    let record_batch = arrow_engine_data.record_batch();
-
-    // Build the expected RecordBatch
-    let expected_schema = Arc::new(Schema::new(vec![
-        Field::new("version", DataType::Int64, false),
-        Field::new("size", DataType::Int64, false),
-        Field::new("parts", DataType::Int64, true),
-        Field::new("sizeInBytes", DataType::Int64, true),
-        Field::new("numOfAddFiles", DataType::Int64, true),
-    ]));
-    let expected = RecordBatch::try_new(
-        expected_schema,
-        vec![
-            create_array!(Int64, [version]),
-            create_array!(Int64, [total_actions_counter]),
-            create_array!(Int64, [None]),
-            create_array!(Int64, [size_in_bytes]),
-            create_array!(Int64, [add_actions_counter]),
-        ],
-    )
-    .unwrap();
-
-    assert_eq!(*record_batch, expected);
-    Ok(())
-}
-
 /// TODO(#855): Merge copies and move to `test_utils`
 /// Create an in-memory store and return the store and the URL for the store's _delta_log directory.
 pub(super) fn new_in_memory_store() -> (Arc<InMemory>, Url) {
@@ -243,7 +198,7 @@ pub(super) async fn write_commit_to_store(
 }
 
 /// Create a Protocol action without v2Checkpoint feature support
-fn create_basic_protocol_action() -> Action {
+pub(super) fn create_basic_protocol_action() -> Action {
     Action::Protocol(
         Protocol::try_new_modern(TableFeature::EMPTY_LIST, TableFeature::EMPTY_LIST).unwrap(),
     )
@@ -329,6 +284,7 @@ async fn assert_last_checkpoint_contents(
     expected_size: u64,
     expected_num_add_files: u64,
     expected_size_in_bytes: u64,
+    expected_checkpoint_schema: &SchemaRef,
 ) -> KernelResult<()> {
     let last_checkpoint_data = read_last_checkpoint_file(store).await?;
     let expected_data = json!({
@@ -336,6 +292,7 @@ async fn assert_last_checkpoint_contents(
         "size": expected_size,
         "sizeInBytes": expected_size_in_bytes,
         "numOfAddFiles": expected_num_add_files,
+        "checkpointSchema": expected_checkpoint_schema,
     });
     assert_eq!(last_checkpoint_data, expected_data);
     Ok(())
@@ -416,13 +373,14 @@ async fn test_v1_checkpoint_latest_version_by_default() -> KernelResult<()> {
         last_modified: 0,
         size: size_in_bytes,
     };
+    let checkpoint_schema = writer.output_schema.clone();
     try_finalize_checkpoint(writer, &engine, &metadata, data_iter)?;
     // Asserts the checkpoint file contents:
     // - version: latest version (2)
     // - size: 1 metadata + 1 protocol + 1 add action + 1 remove action
     // - numOfAddFiles: 1 add file from 2nd commit (fake_path_2)
     // - sizeInBytes: passed to finalize (10)
-    assert_last_checkpoint_contents(&store, 2, 4, 1, size_in_bytes).await?;
+    assert_last_checkpoint_contents(&store, 2, 4, 1, size_in_bytes, &checkpoint_schema).await?;
 
     Ok(())
 }
@@ -484,13 +442,14 @@ async fn test_v1_checkpoint_specific_version() -> KernelResult<()> {
         last_modified: 0,
         size: size_in_bytes,
     };
+    let checkpoint_schema = writer.output_schema.clone();
     try_finalize_checkpoint(writer, &engine, &metadata, data_iter)?;
     // Asserts the checkpoint file contents:
     // - version: specified version (0)
     // - size: 1 metadata + 1 protocol
     // - numOfAddFiles: no add files in version 0
     // - sizeInBytes: passed to finalize (10)
-    assert_last_checkpoint_contents(&store, 0, 2, 0, size_in_bytes).await?;
+    assert_last_checkpoint_contents(&store, 0, 2, 0, size_in_bytes, &checkpoint_schema).await?;
 
     Ok(())
 }
@@ -649,13 +608,14 @@ async fn test_v2_checkpoint_supported_table() -> KernelResult<()> {
         last_modified: 0,
         size: size_in_bytes,
     };
+    let checkpoint_schema = writer.output_schema.clone();
     try_finalize_checkpoint(writer, &engine, &metadata, data_iter)?;
     // Asserts the checkpoint file contents:
     // - version: latest version (1)
     // - size: 1 metadata + 1 protocol + 1 add action + 1 remove action + 1 checkpointMetadata
     // - numOfAddFiles: 1 add file from version 0
     // - sizeInBytes: passed to finalize (10)
-    assert_last_checkpoint_contents(&store, 1, 5, 1, size_in_bytes).await?;
+    assert_last_checkpoint_contents(&store, 1, 5, 1, size_in_bytes, &checkpoint_schema).await?;
 
     Ok(())
 }
@@ -818,13 +778,17 @@ async fn test_snapshot_checkpoint() -> KernelResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let snapshot = Snapshot::builder_for(table_root.clone()).build(&engine)?;
+    let checkpoint_schema = snapshot
+        .clone()
+        .create_checkpoint_writer(&engine)?
+        .output_schema;
 
     snapshot.checkpoint(&engine, None)?;
 
     // First checkpoint: 1 metadata + 1 protocol + 5 add + 3 remove = 10, numOfAddFiles = 5
     let checkpoint_path = Path::from("_delta_log/00000000000000000004.checkpoint.parquet");
     let checkpoint_size = store.head(&checkpoint_path).await?.size;
-    assert_last_checkpoint_contents(&store, 4, 10, 5, checkpoint_size).await?;
+    assert_last_checkpoint_contents(&store, 4, 10, 5, checkpoint_size, &checkpoint_schema).await?;
 
     // Version 5: add 2 files, remove 1
     write_commit_to_store(
@@ -848,7 +812,7 @@ async fn test_snapshot_checkpoint() -> KernelResult<()> {
     // Second checkpoint: 1 metadata + 1 protocol + 7 add + 4 remove = 13, numOfAddFiles = 7
     let checkpoint_path = Path::from("_delta_log/00000000000000000006.checkpoint.parquet");
     let checkpoint_size = store.head(&checkpoint_path).await?.size;
-    assert_last_checkpoint_contents(&store, 6, 13, 7, checkpoint_size).await?;
+    assert_last_checkpoint_contents(&store, 6, 13, 7, checkpoint_size, &checkpoint_schema).await?;
 
     Ok(())
 }
@@ -1050,6 +1014,10 @@ async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer(
     // Checkpoint at version 2
     let snapshot_v2 = Snapshot::builder_for(table_root.clone()).build(&engine)?;
     assert_eq!(snapshot_v2.version(), 2);
+    let checkpoint_schema = snapshot_v2
+        .clone()
+        .create_checkpoint_writer(&engine)?
+        .output_schema;
     snapshot_v2.checkpoint(&engine, None)?;
     let last_checkpoint = read_last_checkpoint_file(&store).await?;
     let size_in_bytes = last_checkpoint
@@ -1058,14 +1026,127 @@ async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer(
         .ok_or_else(|| {
             crate::KernelError::generic("missing or invalid sizeInBytes in _last_checkpoint")
         })?;
-    assert_last_checkpoint_contents(&store, 2, 4, 2, size_in_bytes).await?;
+    assert_last_checkpoint_contents(&store, 2, 4, 2, size_in_bytes, &checkpoint_schema).await?;
 
     // Time-travel to version 1 and writing a checkpoint should not override _last_checkpoint
     let snapshot_v1 = Snapshot::builder_for(table_root)
         .at_version(1)
         .build(&engine)?;
-    snapshot_v1.checkpoint(&engine, None)?;
-    assert_last_checkpoint_contents(&store, 2, 4, 2, size_in_bytes).await
+    let (_, checkpointed_v1) = snapshot_v1.checkpoint(&engine, None)?;
+    assert_last_checkpoint_contents(&store, 2, 4, 2, size_in_bytes, &checkpoint_schema).await?;
+
+    // The returned snapshot keeps the newer hint, which does not apply to its checkpoint.
+    let segment = checkpointed_v1.log_segment();
+    assert_eq!(segment.last_checkpoint_version(), Some(2));
+    assert!(segment.checkpoint_hint().is_none());
+    Ok(())
+}
+
+/// An update of a time-travel checkpoint result keeps the newer hint, so its checkpoint does not
+/// regress `_last_checkpoint` either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_checkpoint_after_skipped_last_checkpoint_write_keeps_newer_hint() -> KernelResult<()>
+{
+    let (store, _) = new_in_memory_store();
+    let engine = SyncEngine::new_with_store(store.clone());
+    let table_root = Url::parse("memory:///")?;
+    let _ = create_table(
+        table_root.as_str(),
+        schema_ref! { nullable "value": INTEGER },
+        "test",
+        true,
+    )
+    .build(&engine, Box::new(FileSystemCommitter::new()))?
+    .commit(&engine)?;
+    for version in 1..=3 {
+        add_commit(
+            table_root.as_str(),
+            store.as_ref(),
+            version,
+            actions_to_string(vec![TestAction::Add(format!("file{version}.parquet"))]),
+        )
+        .await
+        .map_err(|err| KernelError::generic(err.to_string()))?;
+    }
+    Snapshot::builder_for(table_root.clone())
+        .build(&engine)?
+        .checkpoint(&engine, None)?;
+    let hint_at_version_3 = read_last_checkpoint_file(&store).await?;
+
+    let (_, checkpointed_v1) = Snapshot::builder_for(table_root)
+        .at_version(1)
+        .build(&engine)?
+        .checkpoint(&engine, None)?;
+    let (result, _) = Snapshot::builder_from(checkpointed_v1)
+        .at_version(2)
+        .build(&engine)?
+        .checkpoint(&engine, None)?;
+
+    assert_eq!(result, CheckpointWriteResult::Written);
+    assert_eq!(read_last_checkpoint_file(&store).await?, hint_at_version_3);
+    Ok(())
+}
+
+/// Delegates to the inner handler, but fails to write `_last_checkpoint`.
+struct FailingLastCheckpointWrite(Arc<dyn StorageHandler>);
+
+impl StorageHandler for FailingLastCheckpointWrite {
+    fn list_from(&self, path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
+        self.0.list_from(path)
+    }
+    fn read_files(
+        &self,
+        files: Vec<FileSlice>,
+    ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
+        self.0.read_files(files)
+    }
+    fn copy_atomic(&self, src: &Url, dest: &Url) -> KernelResult<()> {
+        self.0.copy_atomic(src, dest)
+    }
+    fn put(&self, path: &Url, data: bytes::Bytes, overwrite: bool) -> KernelResult<()> {
+        if path.path().ends_with("/_last_checkpoint") {
+            return Err(KernelError::generic(
+                "injected _last_checkpoint write failure",
+            ));
+        }
+        self.0.put(path, data, overwrite)
+    }
+    fn head(&self, path: &Url) -> KernelResult<FileMeta> {
+        self.0.head(path)
+    }
+    fn delete(&self, path: &Url) -> KernelResult<()> {
+        self.0.delete(path)
+    }
+}
+
+/// A failed `_last_checkpoint` write fails the checkpoint and leaves the checkpoint file without a
+/// hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_checkpoint_fails_when_last_checkpoint_write_fails() -> KernelResult<()> {
+    let (store, _) = new_in_memory_store();
+    let sync_engine = Arc::new(SyncEngine::new_with_store(store.clone()));
+    write_commit_to_store(
+        &store,
+        vec![create_metadata_action(), create_basic_protocol_action()],
+        0,
+    )
+    .await?;
+    write_commit_to_store(&store, vec![create_add_action("file1.parquet")], 1).await?;
+    let engine = DelegatingEngine::new(sync_engine.clone()).with_storage_handler(Arc::new(
+        FailingLastCheckpointWrite(sync_engine.storage_handler()),
+    ));
+    let table_root = Url::parse("memory:///")?;
+    let snapshot = Snapshot::builder_for(table_root.clone()).build(&engine)?;
+
+    assert_result_error_with_message(
+        snapshot.checkpoint(&engine, None),
+        "injected _last_checkpoint write failure",
+    );
+
+    let snapshot = Snapshot::builder_for(table_root).build(sync_engine.as_ref())?;
+    assert_eq!(snapshot.log_segment().checkpoint_version, Some(1));
+    assert!(snapshot.log_segment().last_checkpoint_metadata.is_none());
+    Ok(())
 }
 
 /// Helper to create metadata action with specific stats settings

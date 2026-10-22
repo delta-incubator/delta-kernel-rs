@@ -735,12 +735,14 @@ impl LogSegmentFiles {
         );
         } else if !checkpoint_metadata.applies_to(&listed_files.checkpoint_parts) {
             // Expected whenever a writer checkpoints a version another writer already checkpointed
-            // and leaves the hint alone. `applies_to` also makes `LogSegment::checkpoint_hint`
-            // yield `None`, so this logs exactly when the hint's fields get dropped.
+            // and leaves the hint alone, or replaces the checkpoint file that the hint describes.
+            // `applies_to` also makes `LogSegment::checkpoint_hint` yield `None`, so this logs
+            // exactly when the hint's fields get dropped.
             debug!(
                 version = checkpoint_metadata.version,
                 hint_parts = checkpoint_metadata.parts.unwrap_or(1),
                 selected_parts = listed_files.checkpoint_parts.len(),
+                hint_size_in_bytes = ?checkpoint_metadata.size_in_bytes,
                 selected_checkpoint_part = %latest_checkpoint.filename,
                 "_last_checkpoint hint describes a different checkpoint than the one selected at \
                  this version; using the checkpoint file's own fields"

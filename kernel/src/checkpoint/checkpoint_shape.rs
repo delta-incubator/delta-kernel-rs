@@ -319,6 +319,11 @@ mod tests {
         CheckpointMetadata, Sidecar, ADD_NAME, MAX_VALUES, MIN_VALUES, NUM_RECORDS,
         SIDECAR_FILE_SCHEMA_TAG, STATS_PARSED,
     };
+    use crate::checkpoint::tests::{
+        create_add_action, create_basic_protocol_action, create_metadata_action,
+        create_v2_checkpoint_protocol_action, new_in_memory_store, write_commit_to_store,
+    };
+    use crate::checkpoint::{CheckpointSpec, V2CheckpointConfig};
     use crate::engine::sync::plan::SyncPlanExecutor;
     use crate::engine::sync::SyncEngine;
     use crate::last_checkpoint_hint::{HintAction, LastCheckpointHint, LastCheckpointV2};
@@ -340,8 +345,12 @@ mod tests {
 
     impl CountingExecutor {
         fn new() -> Self {
+            Self::with_inner(SyncPlanExecutor::default())
+        }
+
+        fn with_inner(inner: SyncPlanExecutor) -> Self {
             Self {
-                inner: SyncPlanExecutor::default(),
+                inner,
                 query_scans: AtomicUsize::new(0),
                 footer_reads: AtomicUsize::new(0),
             }
@@ -829,5 +838,47 @@ mod tests {
             hinted.leaf_checkpoint_schema, footer_shape.leaf_checkpoint_schema,
             "hint schema must match the footer schema"
         );
+    }
+
+    /// The snapshot that `Snapshot::checkpoint` returns has the hint schema, so classifying its
+    /// checkpoint reads no footer.
+    #[rstest]
+    #[case::v1_leaf(false, None, CheckpointType::Leaf)]
+    #[case::v2_leaf(true, None, CheckpointType::Leaf)]
+    #[case::v2_manifest(
+        true,
+        Some(CheckpointSpec::V2(V2CheckpointConfig::WithSidecar {
+            file_actions_per_sidecar_hint: None,
+        })),
+        CheckpointType::Manifest
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kernel_checkpoint_shape_uses_hint_schema(
+        #[case] v2_checkpoint: bool,
+        #[case] spec: Option<CheckpointSpec>,
+        #[case] expected: CheckpointType,
+    ) -> KernelResult<()> {
+        let (store, _) = new_in_memory_store();
+        let engine = SyncEngine::new_with_store(store.clone());
+        let protocol = if v2_checkpoint {
+            create_v2_checkpoint_protocol_action()
+        } else {
+            create_basic_protocol_action()
+        };
+        write_commit_to_store(&store, vec![protocol, create_metadata_action()], 0).await?;
+        write_commit_to_store(&store, vec![create_add_action("file1.parquet")], 1).await?;
+        let snapshot = Snapshot::builder_for("memory:///").build(&engine)?;
+        let (_, checkpointed) = snapshot.checkpoint(&engine, spec.as_ref())?;
+        assert!(checkpointed
+            .log_segment()
+            .checkpoint_hint_schema()
+            .is_some());
+
+        let exec = CountingExecutor::with_inner(SyncPlanExecutor::new(Some(store)));
+        let shape = CheckpointShape::try_new(&exec, checkpointed.as_ref())?;
+
+        assert_eq!(shape.checkpoint_type, expected);
+        assert_eq!(exec.footer_reads.load(Ordering::Relaxed), 0);
+        Ok(())
     }
 }

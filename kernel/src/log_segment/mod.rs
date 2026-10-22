@@ -142,9 +142,10 @@ pub(crate) struct LogSegment {
     /// The set of log files found during listing.
     pub listed: LogSegmentFiles,
 
-    /// The retained `_last_checkpoint` hint, if one was read when this segment was built. The hint
-    /// may describe a different checkpoint than the one this segment selected, so for validated
-    /// access use [`Self::checkpoint_hint`] (and the [`Self::checkpoint_hint_schema`] /
+    /// The retained `_last_checkpoint` hint: the one read when this segment was built, or the one
+    /// that `Snapshot::checkpoint` wrote for this segment's checkpoint. The hint may describe a
+    /// different checkpoint than the one this segment selected, so for validated access use
+    /// [`Self::checkpoint_hint`] (and the [`Self::checkpoint_hint_schema`] /
     /// [`Self::checkpoint_hint_sidecars`] accessors built on it). Read this field directly only
     /// when the raw hint is wanted as-is -- e.g. re-threading it into a derived segment.
     pub(crate) last_checkpoint_metadata: Option<LastCheckpointHint>,
@@ -726,10 +727,17 @@ impl LogSegment {
     /// The checkpoint must be at `end_version`. Kernel does not write multi-part checkpoints,
     /// so the checkpoint must be a single file (classic parquet or V2 UUID).
     ///
+    /// `written_hint` is the `_last_checkpoint` hint written for `checkpoint`. The new segment
+    /// keeps it. `None` keeps the existing hint.
+    ///
     /// If the existing `latest_crc_file` is older than the new checkpoint version, it is
     /// cleared to preserve the `LogSegmentFiles` invariant that `latest_crc_file.version >=
     /// checkpoint version`.
-    pub(crate) fn try_new_with_checkpoint(&self, checkpoint: ParsedLogPath) -> KernelResult<Self> {
+    pub(crate) fn try_new_with_checkpoint(
+        &self,
+        checkpoint: ParsedLogPath,
+        written_hint: Option<LastCheckpointHint>,
+    ) -> KernelResult<Self> {
         require!(
             matches!(
                 checkpoint.file_type,
@@ -765,12 +773,9 @@ impl LogSegment {
             .listed
             .latest_crc_file
             .take_if(|crc| crc.version < checkpoint_version);
-        // TODO(#839): Once CheckpointWriter exposes the output schema, synthesize a
-        // LastCheckpointHint and thread it through here instead of None. Today the
-        // schema is computed inside checkpoint_data() but not returned. With None, the next
-        // scan will read the checkpoint parquet footer to determine the schema (e.g.
-        // whether stats_parsed or sidecar columns exist).
-        new_log_segment.last_checkpoint_metadata = None;
+        if let Some(hint) = written_hint {
+            new_log_segment.last_checkpoint_metadata = Some(hint);
+        }
         Ok(new_log_segment)
     }
 

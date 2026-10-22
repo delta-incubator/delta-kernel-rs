@@ -4,6 +4,7 @@ mod checkpoint_transform;
 mod crc;
 mod empty_log_files;
 mod history_manager;
+mod last_checkpoint_hint;
 mod log_compaction;
 mod log_tail;
 mod snapshot_build;

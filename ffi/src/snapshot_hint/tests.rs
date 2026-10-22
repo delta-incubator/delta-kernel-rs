@@ -1507,7 +1507,7 @@ fn aggregate_with_builds_latest_snapshot_from_rich_crc(
     let log_path = FfiLogPath::new(
         slice("memory:///hinted-table/_delta_log/00000000000000000000.checkpoint.parquet"),
         1,
-        1,
+        271,
     );
     let checkpoint_tags = [FfiStringMapEntry {
         key: slice("checkpoint-tag"),

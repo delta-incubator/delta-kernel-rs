@@ -1538,10 +1538,11 @@ impl Snapshot {
     /// Note:
     ///     - It is still possible that an existing checkpoint gets overwritten if that checkpoint
     ///       was written by a concurrent writer.
-    ///     - This function uses [`crate::ParquetHandler::write_parquet_file`] and
-    ///       [`crate::StorageHandler::head`], which may not be implemented by all engines. If you
-    ///       are using the default engine, make sure to build it with the multi-threaded executor
-    ///       if you want to use this method.
+    ///     - This function uses [`crate::ParquetHandler::write_parquet_file`],
+    ///       [`crate::StorageHandler::head`], and [`crate::StorageHandler::put`] (for
+    ///       `_last_checkpoint`), which may not be implemented by all engines. If you are using the
+    ///       default engine, make sure to build it with the multi-threaded executor if you want to
+    ///       use this method.
     ///
     /// [`CheckpointSpec`]: crate::checkpoint::CheckpointSpec
     ///
@@ -1626,14 +1627,14 @@ impl Snapshot {
             Err(e) => return Err(e),
         };
 
-        writer.finalize(engine, &info.last_checkpoint_stats)?;
+        let written_hint = writer.write_last_checkpoint(engine, &info.last_checkpoint_stats)?;
 
         let checkpoint_log_path = ParsedLogPath::try_from(info.file_meta)?.ok_or_else(|| {
             KernelError::internal_error("Checkpoint path could not be parsed as a log path")
         })?;
         let new_log_segment = self
             .log_segment
-            .try_new_with_checkpoint(checkpoint_log_path)?;
+            .try_new_with_checkpoint(checkpoint_log_path, written_hint)?;
         // Carry only an at-version CRC forward: the checkpoint drops the commits below it, so a
         // stale base could no longer be advanced over them.
         Ok((
