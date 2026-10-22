@@ -3859,6 +3859,27 @@ mod tests {
         assert_eq!(ordered_list_view.value(2).len(), 1);
     }
 
+    #[test]
+    fn reorder_list_view_rejects_non_struct_values() {
+        let values = Arc::new(Int32Array::from(vec![10, 20, 30])) as ArrowArrayRef;
+        let offsets = ScalarBuffer::<i32>::from(vec![0, 1, 2]);
+        let sizes = ScalarBuffer::<i32>::from(vec![1, 1, 1]);
+        let item_field = Arc::new(ArrowField::new("item", ArrowDataType::Int32, false));
+        let list_view = Arc::new(
+            GenericListViewArray::<i32>::try_new(item_field, offsets, sizes, values, None).unwrap(),
+        );
+        let list_field = Arc::new(ArrowField::new("list", list_view.data_type().clone(), true));
+        let struct_array = StructArray::from(vec![(list_field, list_view as ArrowArrayRef)]);
+        let reorder = vec![ReorderIndex::nested(
+            0,
+            vec![ReorderIndex::cast(0, ArrowDataType::Int64)],
+        )];
+
+        let err = reorder_struct_array(struct_array, &reorder, None, None)
+            .expect_err("non-struct list view values should be rejected");
+        assert!(err.to_string().contains("should have had struct child"));
+    }
+
     // boy howdy this is more complicated than expected
     fn build_arrow_map() -> MapArray {
         let key_struct_builder = StructBuilder::from_fields(
