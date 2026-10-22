@@ -823,7 +823,7 @@ impl RowVisitor for CommitFilePathCollector {
     )))
 )]
 #[tokio::test]
-async fn json_readers_preserve_file_paths_across_batches_and_empty_commits(
+async fn replay_schemas_preserve_file_paths_across_batches_and_empty_commits(
     #[case] engine: Arc<dyn Engine>,
     #[values(PreparePhaseVisitor::schema(), CommitScanProcessor::schema())] schema: SchemaRef,
 ) {
@@ -885,7 +885,10 @@ async fn json_readers_preserve_file_paths_across_batches_and_empty_commits(
         "the first commit must span multiple batches"
     );
     assert_eq!(batch_counts[1], 0);
-    assert!(batch_counts[2] > 0);
+    assert!(
+        batch_counts[2] > 0,
+        "the final nonempty commit must produce at least one batch"
+    );
 }
 
 #[tokio::test]
