@@ -26,9 +26,9 @@ use crate::path::ParsedLogPath;
 use crate::snapshot::{IncrementalReplay, SnapshotBuilder, SnapshotRef};
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::table_features::TableFeature;
-use crate::unit_test_utils::TestCancellationToken;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::unit_test_utils::adaptive_metadata_fixtures::last_manifest_commit_info;
+use crate::unit_test_utils::TestCancellationToken;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::unit_test_utils::{
     adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
@@ -791,19 +791,20 @@ async fn test_lagging_checkpoint_action_defers_to_crc_pm() {
         .assert_p_m(None, crc_config.protocol(), crc_config.metadata());
 }
 
-// A CRC-seeded pruned replay (CRC below target) that finds a checkpoint action in the commits
-// after the CRC captures it: those commits include the newest, and checkpoint versions strictly
-// increase, so a hit is the latest action.
+// A CRC-seeded pruned replay (CRC below target) resolves a checkpoint action in the commits after
+// the CRC. The non-plan replay captures it there: those commits include the newest, and checkpoint
+// versions strictly increase, so a hit is the latest action. A plan replay bounded by a CRC reads
+// no checkpoint action, so the snapshot follows the newest commit's pointer to the same action.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[tokio::test]
-async fn test_crc_seeded_replay_captures_checkpoint_action_after_crc() {
+async fn test_crc_seeded_replay_resolves_checkpoint_action_after_crc() {
     let crc_config =
         adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
     let checkpoint_config = adaptive_metadata_table_configuration(
         test_schema_flat_with_column_mapping(),
         &[TableFeature::TimestampWithoutTimezone],
     );
-    let resolution = CrcReadTest::new()
+    let test = CrcReadTest::new()
         .commit(
             0,
             [
@@ -830,12 +831,17 @@ async fn test_crc_seeded_replay_captures_checkpoint_action_after_crc() {
             ],
         )
         .build()
-        .await
-        .captured_checkpoint_action();
-    assert!(
-        resolution.is_some_and(|a| a.version == 1),
-        "a checkpoint action after the CRC is the latest and must be captured, not deferred"
+        .await;
+    let captured = test
+        .captured_checkpoint_action()
+        .map(|action| action.version);
+    assert_eq!(
+        captured,
+        (!cfg!(feature = "declarative-plans")).then_some(1)
     );
+    let (snapshot, _) = test.snapshot_at(None);
+    let action = snapshot.latest_checkpoint_action(&test.engine).unwrap();
+    assert_eq!(action.map(|action| action.version), Some(1));
 }
 
 // A CRC at the target version short-circuits before any replay, so no checkpoint action is
