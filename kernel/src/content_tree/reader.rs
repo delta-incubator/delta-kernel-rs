@@ -2,11 +2,13 @@
 //!
 //! Translates the content-tree entries of an AMT root or leaf manifest into `Add` file actions --
 //! the inverse of [`super::builder`]. This is the minimal read path: a root manifest's live `Data`
-//! entries become `Add` actions and every other entry is dropped; a leaf manifest may contain only
-//! `Data` entries and errors otherwise. Statistics, partition values, tags, and deletion vectors
-//! are not yet carried across (see the per-field TODOs); the only entry data that flows into the
-//! action is the file location, size, and row-tracking numbers. `modificationTime` and
-//! `dataChange` have no AMT source and are supplied by the caller via [`ReadContext`].
+//! entries become `Add` actions, its live `DataManifest` entries are expanded into the `Add`
+//! actions of the leaf manifests they reference, and every other root entry is dropped. A leaf
+//! manifest may contain only `Data` entries and errors otherwise. Statistics, partition values,
+//! tags, and deletion vectors are not yet carried across (see the per-field TODOs); the only entry
+//! data that flows into the action is the file location, size, and row-tracking numbers.
+//! `modificationTime` and `dataChange` have no AMT source and are supplied by the caller via
+//! [`ReadContext`].
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, LazyLock};
@@ -89,7 +91,7 @@ pub(crate) fn read_add_actions_from_amt(
         root_actions.push(converter.convert(batch.as_ref())?);
     }
     let leaf_actions =
-        LeafActions::try_new(engine, leaves.leaves, schemas.leaf, ctx, cancellation_token)?;
+        LeafToAddActions::try_new(engine, leaves.leaves, schemas.leaf, ctx, cancellation_token)?;
     Ok(Box::new(
         root_actions.into_iter().map(Ok).chain(leaf_actions),
     ))
@@ -439,7 +441,7 @@ fn tracking_start(getters: &[&dyn GetData<'_>]) -> usize {
 /// Iterator of `Add`-action batches for all live leaf manifests, read in a single request. The
 /// engine is expected to return each leaf's batches together and in request order, each tagged
 /// with the leaf's requested location in `_file`.
-struct LeafActions {
+struct LeafToAddActions {
     /// Leaves whose reads are still in progress, in request order, each with its location and
     /// context. The front is the leaf currently being read.
     pending: VecDeque<(String, LeafReadContext)>,
@@ -447,7 +449,7 @@ struct LeafActions {
     batches: Option<FileDataReadResultIterator>,
 }
 
-impl LeafActions {
+impl LeafToAddActions {
     /// Validates and reads all the leaves, with `read_schema` (see [`ManifestReadSchema::leaf`]),
     /// stopping when `cancellation_token` is cancelled.
     ///
@@ -505,7 +507,10 @@ impl LeafActions {
 
     /// Converts one leaf batch with the context of the leaf named by its `_file` value. Leaves
     /// before that one produced no further batches, so they are finished and dropped.
-    fn convert(&mut self, batch: &dyn EngineData) -> KernelResult<FilteredEngineData> {
+    fn convert_to_add_actions(
+        &mut self,
+        batch: &dyn EngineData,
+    ) -> KernelResult<FilteredEngineData> {
         let file = file_path_of(batch)?;
         while self
             .pending
@@ -527,7 +532,7 @@ impl LeafActions {
     }
 }
 
-impl Iterator for LeafActions {
+impl Iterator for LeafToAddActions {
     type Item = KernelResult<FilteredEngineData>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -535,7 +540,7 @@ impl Iterator for LeafActions {
             let result = match self.batches.as_mut()?.next()? {
                 // An empty batch carries no `_file` to group by, and no actions.
                 Ok(batch) if batch.is_empty() => continue,
-                Ok(batch) => self.convert(batch.as_ref()),
+                Ok(batch) => self.convert_to_add_actions(batch.as_ref()),
                 Err(e) => Err(e),
             };
             // Fail every later batch rather than convert it with stale `firstRowId`s.
@@ -1536,7 +1541,7 @@ mod tests {
     ) {
         let engine = SyncEngine::new();
         let leaf = "memory:///table/leaf.parquet".to_string();
-        let mut actions = LeafActions {
+        let mut actions = LeafToAddActions {
             pending: VecDeque::from([(
                 leaf,
                 LeafReadContext::new(&engine, &valid_parent(), &read_ctx()).unwrap(),
@@ -1551,7 +1556,7 @@ mod tests {
             .evaluation_handler()
             .create_many(schema, vec![vec![file]])
             .unwrap();
-        assert_result_error_with_message(actions.convert(batch.as_ref()), message);
+        assert_result_error_with_message(actions.convert_to_add_actions(batch.as_ref()), message);
     }
 
     #[rstest]
