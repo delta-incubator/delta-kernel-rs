@@ -535,7 +535,7 @@ impl PlanBuilder {
     /// )?
     /// .prefix_sum(column_name!("numRecords"), "offset")?
     /// .build()?;
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
     pub fn prefix_sum(
         self,
