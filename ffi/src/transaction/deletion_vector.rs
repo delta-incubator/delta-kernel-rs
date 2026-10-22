@@ -8,7 +8,7 @@ use std::os::raw::c_int;
 
 use delta_kernel::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
 use delta_kernel::transaction::Transaction;
-use delta_kernel::{KernelError, KernelResult, Result};
+use delta_kernel::{KernelError, KernelResult};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 use super::ExclusiveUpdateTableTransaction;
@@ -102,7 +102,7 @@ impl From<KernelDvStorageType> for DeletionVectorStorageType {
 impl TryFrom<c_int> for KernelDvStorageType {
     type Error = KernelError;
 
-    fn try_from(value: c_int) -> Result<Self> {
+    fn try_from(value: c_int) -> KernelResult<Self> {
         match value {
             0 => Ok(Self::PersistedRelative),
             1 => Ok(Self::Inline),
@@ -229,9 +229,9 @@ fn dv_descriptor_map_insert_impl(
 /// references a path that does not appear in the iterator, the call returns an error and
 /// leaves the transaction unchanged.
 ///
-/// This stages data-changing DV updates by default. Configure the update-table builder with
-/// [`crate::transaction::update_table_txn_builder_with_data_change`] for maintenance operations
-/// that should commit with `dataChange = false`.
+/// These updates use the `data_change` flag supplied to
+/// [`crate::transaction::new_update_table_txn_builder`]. Pass `false` for maintenance operations
+/// that preserve logical data.
 ///
 /// # Safety
 ///

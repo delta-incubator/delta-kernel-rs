@@ -11,7 +11,7 @@ use crate::log_replay::HasSelectionVector;
 use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
 use crate::table_properties::TableProperties;
-use crate::{Engine, KernelError, KernelResult, Result, SnapshotRef, Version};
+use crate::{Engine, KernelError, KernelResult, SnapshotRef, Version};
 
 /// Determine if log compaction should be performed based on the commit version and
 /// compaction interval.
@@ -96,7 +96,10 @@ impl LogCompactionWriter {
     /// Get an iterator over the compaction data to be written
     ///
     /// Performs action reconciliation for the version range specified in the constructor
-    pub fn compaction_data(&mut self, engine: &dyn Engine) -> Result<ActionReconciliationIterator> {
+    pub fn compaction_data(
+        &mut self,
+        engine: &dyn Engine,
+    ) -> KernelResult<ActionReconciliationIterator> {
         // Validate that the requested version range is within the snapshot's range
         let snapshot_end_version = self.snapshot.version();
         if self.end_version > snapshot_end_version {
@@ -126,6 +129,7 @@ impl LogCompactionWriter {
         let mut processor = ActionReconciliationProcessor::new(
             min_file_retention_timestamp_millis,
             self.get_transaction_expiration_timestamp()?,
+            self.snapshot.table_configuration().dv_normalization_root(),
         );
 
         // Process actions using the same iterator pattern as checkpoints

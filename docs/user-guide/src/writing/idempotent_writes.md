@@ -33,9 +33,9 @@ committing:
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::transaction::{CommitResult, UpdateTableOperation};
-# use delta_kernel::{Result, Snapshot};
+# use delta_kernel::{KernelResult, Snapshot};
 # #[tokio::main]
-# async fn main() -> Result<()> {
+# async fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 # let snapshot = Snapshot::builder_for(url).build(&engine)?;
@@ -52,9 +52,8 @@ if let Some(committed_version) = snapshot.get_app_id_version(app_id, &engine)? {
 
 // Not yet committed. Proceed with the write.
 let txn = snapshot
-    .transaction_builder()
+    .update_table(UpdateTableOperation::StreamingUpdate, "my-app/1.0", /* data_change */ true)
     .with_transaction_id(app_id.to_string(), batch_version)
-    .with_operation(UpdateTableOperation::StreamingUpdate)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
 // ... write data, add files, commit ...

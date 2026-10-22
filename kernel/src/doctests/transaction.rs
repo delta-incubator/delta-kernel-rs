@@ -70,9 +70,9 @@ pub struct SealedExecutionMode;
 ///
 /// ```no_run
 /// use delta_kernel::transaction::{UpdateTable, Transaction, ExecutionMode};
-/// use delta_kernel::Result;
+/// use delta_kernel::KernelResult;
 ///
-/// fn configure<MODE: ExecutionMode>(txn: Transaction<UpdateTable, MODE>) -> Result<()> {
+/// fn configure<MODE: ExecutionMode>(txn: Transaction<UpdateTable, MODE>) -> KernelResult<()> {
 ///     let txn = txn.with_operation_metrics([("numFiles", Some("1"))]);
 ///     let _state = txn.write_state()?;
 ///     Ok(())
@@ -88,7 +88,7 @@ pub struct SharedConfiguration;
 /// use delta_kernel::actions::deletion_vector::DeletionVectorDescriptor;
 /// use delta_kernel::engine_data::FilteredEngineData;
 /// use delta_kernel::transaction::{CommitResult, UpdateTable, Imperative, Transaction};
-/// use delta_kernel::{Engine, EngineData, Result};
+/// use delta_kernel::{Engine, EngineData, KernelResult};
 ///
 /// fn stage_and_commit(
 ///     txn: Transaction,
@@ -96,8 +96,8 @@ pub struct SharedConfiguration;
 ///     add_metadata: Box<dyn EngineData>,
 ///     remove_metadata: FilteredEngineData,
 ///     new_dv_descriptors: HashMap<String, DeletionVectorDescriptor>,
-///     existing_data_files: impl Iterator<Item = Result<FilteredEngineData>>,
-/// ) -> Result<CommitResult> {
+///     existing_data_files: impl Iterator<Item = KernelResult<FilteredEngineData>>,
+/// ) -> KernelResult<CommitResult> {
 ///     let mut txn: Transaction<UpdateTable, Imperative> = txn;
 ///     txn.add_files(add_metadata);
 ///     txn.remove_files(remove_metadata);

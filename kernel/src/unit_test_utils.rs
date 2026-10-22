@@ -46,7 +46,7 @@ use crate::table_properties::{
 use crate::transaction::create_table::create_table;
 use crate::transaction::{CreateTable, Transaction, BASE_ADD_FILES_SCHEMA};
 use crate::{
-    Engine, EngineData, FileMeta, KernelError, KernelResult, Result, Snapshot, SnapshotRef, Version,
+    Engine, EngineData, FileMeta, KernelError, KernelResult, Snapshot, SnapshotRef, Version,
 };
 
 /// Parses `path` (a full URL string) into a [`ParsedLogPath`] with zero size, for building
@@ -346,11 +346,21 @@ pub(crate) mod adaptive_metadata_fixtures {
         path: &str,
         version: Version,
     ) -> KernelResult<CheckpointAction> {
+        checkpoint_action_with_root(path, 1024, version)
+    }
+
+    /// A minimal `checkpoint` action referencing a `size_in_bytes` content root at `path`, at
+    /// `version`.
+    pub(crate) fn checkpoint_action_with_root(
+        path: &str,
+        size_in_bytes: i64,
+        version: Version,
+    ) -> KernelResult<CheckpointAction> {
         let (protocol, metadata) = adaptive_metadata_protocol_and_metadata();
         let version = version_as_i64(version)?;
         Ok(CheckpointAction::new(
             version,
-            ContentRoot::new(path.to_string(), 1024, version),
+            ContentRoot::new(path.to_string(), size_in_bytes, version),
             protocol,
             metadata,
             vec![],
@@ -362,7 +372,7 @@ pub(crate) mod adaptive_metadata_fixtures {
     pub(crate) fn setup_table() -> KernelResult<(SyncEngine, Url)> {
         let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
         let schema = schema_ref! { nullable "id": INTEGER };
-        let _ = create_table("memory:///", schema, "test")
+        let _ = create_table("memory:///", schema, "test", true)
             .build(&engine, Box::new(FileSystemCommitter::new()))?
             .commit(&engine)?;
         let table_root = Snapshot::builder_for("memory:///")
@@ -392,7 +402,10 @@ pub(crate) mod adaptive_metadata_fixtures {
 
 // TODO: allow tests to pass in context (issue#1133)
 #[track_caller]
-pub(crate) fn assert_result_error_with_message<T, E: ToString>(res: Result<T, E>, message: &str) {
+pub(crate) fn assert_result_error_with_message<T, E: ToString>(
+    res: KernelResult<T, E>,
+    message: &str,
+) {
     match res {
         Ok(_) => panic!("Expected error with message {message}, but got Ok result"),
         Err(error) => {
@@ -1181,7 +1194,7 @@ pub(crate) fn setup_column_mapping_txn(
     let store = Arc::new(InMemory::new());
     let engine: Arc<dyn Engine> = Arc::new(SyncEngine::new_with_store(store));
 
-    let txn = create_table("memory:///test_table", schema, "DefaultEngine")
+    let txn = create_table("memory:///test_table", schema, "DefaultEngine", true)
         .with_table_properties([("delta.columnMapping.mode", mode_str)])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     Ok((engine, txn))

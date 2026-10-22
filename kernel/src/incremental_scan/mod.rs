@@ -4,6 +4,8 @@
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
+use url::Url;
+
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor};
 use crate::expressions::{column_name, ColumnName};
 use crate::log_replay::deduplicator::{Deduplicator, FileActionInfo};
@@ -16,7 +18,7 @@ use crate::table_features::Operation;
 use crate::utils::require;
 use crate::{
     Engine, EngineData, FileDataReadResultIterator, FileMeta, KernelError, KernelResult,
-    PredicateRef, Result, Version,
+    PredicateRef, Version,
 };
 
 /// Builder for an incremental scan over `(base_version, target_version]`. Construct via
@@ -82,7 +84,7 @@ impl IncrementalScanBuilder {
     ///   references a column absent from the table schema.
     /// - `Err` if the target snapshot's protocol contains an unsupported reader feature.
     /// - `Err` if the engine fails to open the commit stream.
-    pub fn build(self, engine: &dyn Engine) -> Result<Option<IncrementalScanStream>> {
+    pub fn build(self, engine: &dyn Engine) -> KernelResult<Option<IncrementalScanStream>> {
         // TODO(#2493): the version validation, the snapshot-commit-list extraction and
         // clipping below, and the "snapshot covers the range" check should all be replaced
         // by a single `CommitRangeBuilder::from_snapshot(...).build(engine)` call once
@@ -158,6 +160,10 @@ impl IncrementalScanBuilder {
             live_adds: HashSet::new(),
             removes: HashSet::new(),
             errored: false,
+            dv_normalization_root: self
+                .target_snapshot
+                .table_configuration()
+                .dv_normalization_root(),
         }))
     }
 
@@ -233,10 +239,12 @@ pub struct IncrementalScanStream {
     live_adds: HashSet<FileActionKey>,
     removes: HashSet<FileActionKey>,
     errored: bool,
+    /// Table root for normalizing paths. `Some` iff adaptiveMetadata is enabled.
+    dv_normalization_root: Option<Url>,
 }
 
 impl Iterator for IncrementalScanStream {
-    type Item = Result<FilteredEngineData>;
+    type Item = KernelResult<FilteredEngineData>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.errored {
@@ -254,6 +262,7 @@ impl Iterator for IncrementalScanStream {
                     &mut self.seen_file_keys,
                     &mut self.live_adds,
                     &mut self.removes,
+                    self.dv_normalization_root.clone(),
                 ) {
                     Ok(Some(filtered)) => return Some(Ok(filtered)),
                     Ok(None) => continue,
@@ -284,7 +293,7 @@ impl IncrementalScanStream {
     ///   "cannot finish a stream that previously errored" when a terminal method is called after a
     ///   prior `next()` returned `Err`. Rebuild to retry the latter; the former indicates table
     ///   corruption.
-    pub fn into_summary(mut self) -> Result<IncrementalScanSummary> {
+    pub fn into_summary(mut self) -> KernelResult<IncrementalScanSummary> {
         if self.errored {
             return Err(KernelError::generic(
                 "IncrementalScanStream: cannot finish a stream that previously errored",
@@ -317,7 +326,7 @@ impl IncrementalScanStream {
     ///
     /// [`into_summary`]: Self::into_summary
     /// [`ActionsBatch`]: crate::log_replay::ActionsBatch
-    pub fn into_listing(mut self) -> Result<IncrementalListing> {
+    pub fn into_listing(mut self) -> KernelResult<IncrementalListing> {
         let mut add_files: Vec<FilteredEngineData> = Vec::new();
         for item in self.by_ref() {
             add_files.push(item?);
@@ -349,7 +358,7 @@ impl IncrementalScanStream {
     pub fn into_summary_against_base_iter<'a>(
         self,
         base_keys: impl IntoIterator<Item = &'a FileActionKey>,
-    ) -> Result<IncrementalScanSummaryAgainstBase> {
+    ) -> KernelResult<IncrementalScanSummaryAgainstBase> {
         let summary = self.into_summary()?;
         let duplicate_adds: HashSet<FileActionKey> = base_keys
             .into_iter()
@@ -382,7 +391,7 @@ impl IncrementalScanStream {
     pub fn into_summary_against_base_closure(
         self,
         base_contains: impl Fn(&FileActionKey) -> bool,
-    ) -> Result<IncrementalScanSummaryAgainstBase> {
+    ) -> KernelResult<IncrementalScanSummaryAgainstBase> {
         let summary = self.into_summary()?;
         let duplicate_adds: HashSet<FileActionKey> = summary
             .live_adds
@@ -415,7 +424,7 @@ impl IncrementalScanStream {
     pub fn into_listing_against_base_iter<'a>(
         mut self,
         base_keys: impl IntoIterator<Item = &'a FileActionKey>,
-    ) -> Result<IncrementalListingAgainstBase> {
+    ) -> KernelResult<IncrementalListingAgainstBase> {
         let mut add_files: Vec<FilteredEngineData> = Vec::new();
         for item in self.by_ref() {
             add_files.push(item?);
@@ -436,7 +445,7 @@ impl IncrementalScanStream {
     pub fn into_listing_against_base_closure(
         mut self,
         base_contains: impl Fn(&FileActionKey) -> bool,
-    ) -> Result<IncrementalListingAgainstBase> {
+    ) -> KernelResult<IncrementalListingAgainstBase> {
         let mut add_files: Vec<FilteredEngineData> = Vec::new();
         for item in self.by_ref() {
             add_files.push(item?);
@@ -465,6 +474,12 @@ impl std::fmt::Debug for IncrementalScanStream {
 /// on the full key rather than just the path: the same path with different DV ids (e.g. an
 /// `add(P, dv=new) + remove(P, dv=old)` DV-replacement pair) refers to distinct logical
 /// files, and collapsing to path alone loses that distinction.
+///
+/// To compare against keys built from a [`DeletionVectorDescriptor`], derive the DV id with
+/// [`DeletionVectorDescriptor::unique_id_for`] using the scan's target snapshot.
+///
+/// [`DeletionVectorDescriptor`]: crate::actions::deletion_vector::DeletionVectorDescriptor
+/// [`DeletionVectorDescriptor::unique_id_for`]: crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_for
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct IncrementalScanSummary {
@@ -561,6 +576,7 @@ fn process_batch(
     seen_file_keys: &mut HashSet<FileActionKey>,
     live_adds: &mut HashSet<FileActionKey>,
     removes: &mut HashSet<FileActionKey>,
+    dv_normalization_root: Option<Url>,
 ) -> KernelResult<Option<FilteredEngineData>> {
     let row_count = batch.len();
     let mut adds_sel = vec![false; row_count];
@@ -583,6 +599,7 @@ fn process_batch(
         REMOVE_PATH_INDEX,
         ADD_DV_START_INDEX,
         REMOVE_DV_START_INDEX,
+        dv_normalization_root,
     );
     let mut visitor = IncrementalDedupVisitor {
         deduplicator,
@@ -656,7 +673,7 @@ impl RowVisitor for IncrementalDedupVisitor<'_, '_> {
         (names, types)
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         require!(
             getters.len() == NUM_GETTERS,
             KernelError::InternalError(format!(

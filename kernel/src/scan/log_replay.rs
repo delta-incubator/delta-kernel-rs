@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 use delta_kernel_derive::internal_api;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use super::data_skipping::DataSkippingFilter;
 use super::metrics::ScanMetrics;
@@ -32,7 +33,7 @@ use crate::schema::{
 use crate::struct_patch::{project_struct_preserving_nulls, ProjectionStructPatchBuilder};
 use crate::table_features::ColumnMappingMode;
 use crate::utils::{require, FoldWithOption as _};
-use crate::{Engine, ExpressionEvaluator, KernelError, KernelResult, Result};
+use crate::{Engine, ExpressionEvaluator, KernelError, KernelResult};
 
 /// Read-time stats toggles consumed by [`ScanLogReplayProcessor`].
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -96,6 +97,9 @@ struct InternalScanState {
     #[serde(default)]
     is_catalog_managed: bool,
     skip_row_transforms: bool,
+    /// Table root for normalizing paths. `Some` iff adaptiveMetadata is enabled.
+    #[serde(default)]
+    dv_normalization_root: Option<Url>,
 }
 
 /// Serializable processor state for distributed processing. This can be serialized using the
@@ -388,7 +392,7 @@ impl ScanLogReplayProcessor {
     /// undefined behaviour!
     #[internal_api]
     #[allow(unused)]
-    pub(crate) fn into_serializable_state(self) -> Result<SerializableScanState> {
+    pub(crate) fn into_serializable_state(self) -> KernelResult<SerializableScanState> {
         let StateInfo {
             logical_schema,
             physical_schema,
@@ -401,6 +405,7 @@ impl ScanLogReplayProcessor {
             requested_physical_stats_columns,
             is_catalog_managed,
             skip_row_transforms,
+            dv_normalization_root,
         } = self.state_info.as_ref().clone();
 
         // Extract predicate from PhysicalPredicate
@@ -424,6 +429,7 @@ impl ScanLogReplayProcessor {
             requested_physical_stats_columns,
             is_catalog_managed,
             skip_row_transforms,
+            dv_normalization_root,
         };
         let internal_state_blob = serde_json::to_vec(&internal_state).map_err(|e| {
             KernelError::generic(format!("Failed to serialize internal state: {e}"))
@@ -455,7 +461,7 @@ impl ScanLogReplayProcessor {
     pub(crate) fn from_serializable_state(
         engine: &dyn Engine,
         state: SerializableScanState,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         // Deserialize internal state from json
         let internal_state: InternalScanState = serde_json::from_slice(&state.internal_state_blob)
             .map_err(KernelError::MalformedJson)?;
@@ -488,6 +494,7 @@ impl ScanLogReplayProcessor {
             requested_physical_stats_columns: internal_state.requested_physical_stats_columns,
             is_catalog_managed: internal_state.is_catalog_managed,
             skip_row_transforms: internal_state.skip_row_transforms,
+            dv_normalization_root: internal_state.dv_normalization_root,
         });
 
         Self::new_with_seen_files(
@@ -539,7 +546,7 @@ impl ScanLogReplayProcessor {
     fn project_stats_output(
         &self,
         transformed_actions: Box<dyn EngineData>,
-    ) -> Result<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         match &self.stats_output_projection {
             Some(projection) => projection.evaluate(transformed_actions.as_ref()),
             None => Ok(transformed_actions),
@@ -770,7 +777,7 @@ impl<D: Deduplicator> RowVisitor for AddRemoveDedupVisitor<'_, D> {
         }
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         let start = std::time::Instant::now();
 
         let is_log_batch = self.deduplicator.is_log_batch();
@@ -869,7 +876,7 @@ fn build_stats_output_projection(
     engine: &dyn Engine,
     input_schema: SchemaRef,
     output_stats_schema: Option<&StructType>,
-) -> Result<Option<Arc<dyn ExpressionEvaluator>>> {
+) -> KernelResult<Option<Arc<dyn ExpressionEvaluator>>> {
     let input_stats_schema =
         input_schema
             .field(STATS_PARSED_NAME)
@@ -1023,7 +1030,10 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
         fields(enable_call_frame),
         err
     )]
-    fn process_actions_batch_parallel(&self, actions_batch: ActionsBatch) -> Result<Self::Output> {
+    fn process_actions_batch_parallel(
+        &self,
+        actions_batch: ActionsBatch,
+    ) -> KernelResult<Self::Output> {
         let ActionsBatch {
             actions,
             is_log_batch,
@@ -1059,6 +1069,7 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
             Self::ADD_PATH_INDEX,
             Self::ADD_SIZE_INDEX,
             Self::ADD_DV_START_INDEX,
+            self.state_info.dv_normalization_root.clone(),
         )?;
         let (dedup_selection, row_transform_exprs, active_add_file_sizes) = {
             let mut visitor = AddRemoveDedupVisitor::new(
@@ -1124,7 +1135,7 @@ impl ScanLogReplayProcessor {
     pub(crate) fn process_actions_batch_sequential(
         &mut self,
         actions_batch: ActionsBatch,
-    ) -> Result<ScanMetadata> {
+    ) -> KernelResult<ScanMetadata> {
         let ActionsBatch {
             actions,
             is_log_batch,
@@ -1166,6 +1177,7 @@ impl ScanLogReplayProcessor {
             Self::REMOVE_PATH_INDEX,
             Self::ADD_DV_START_INDEX,
             Self::REMOVE_DV_START_INDEX,
+            self.state_info.dv_normalization_root.clone(),
         );
         let (dedup_selection, row_transform_exprs, active_add_file_sizes) = {
             let mut visitor = AddRemoveDedupVisitor::new(
@@ -1215,7 +1227,7 @@ impl ScanLogReplayProcessor {
         Ok(scan_metadata)
     }
 
-    fn build_selection_vector(&self, batch: &dyn EngineData) -> Result<Vec<bool>> {
+    fn build_selection_vector(&self, batch: &dyn EngineData) -> KernelResult<Vec<bool>> {
         match &self.data_skipping_filter {
             Some(filter) => filter.apply(batch),
             None => Ok(vec![true; batch.len()]),
@@ -1271,6 +1283,7 @@ mod tests {
     use std::time::Duration;
 
     use rstest::rstest;
+    use url::Url;
 
     use super::{
         get_add_transform_expr, scan_action_iter, InternalScanState, ScanLogReplayProcessor,
@@ -1303,7 +1316,8 @@ mod tests {
     use crate::table_features::ColumnMappingMode;
     use crate::unit_test_utils::assert_result_error_with_message;
     use crate::{
-        EngineData, Expression as Expr, ExpressionEvaluator, ExpressionRef, KernelError, Result,
+        EngineData, Expression as Expr, ExpressionEvaluator, ExpressionRef, KernelError,
+        KernelResult,
     };
 
     /// Test evaluator that fails once before delegating, exposing both timed transform attempts.
@@ -1315,7 +1329,7 @@ mod tests {
 
     impl ExpressionEvaluator for RetryOnceEvaluator {
         /// Delays each attempt for deterministic timing, then triggers exactly one retry.
-        fn evaluate(&self, batch: &dyn EngineData) -> Result<Box<dyn EngineData>> {
+        fn evaluate(&self, batch: &dyn EngineData) -> KernelResult<Box<dyn EngineData>> {
             std::thread::sleep(self.delay);
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 Err(KernelError::ParseError(
@@ -1347,7 +1361,7 @@ mod tests {
             _evaluator: &DirectPredicateEvaluator<'_>,
             _exprs: &[Expr],
             _inverted: bool,
-        ) -> Result<Option<bool>> {
+        ) -> KernelResult<Option<bool>> {
             unimplemented!()
         }
 
@@ -1464,6 +1478,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         });
         let (iter, _metrics) = scan_action_iter(
             &SyncEngine::new(),
@@ -1621,7 +1636,9 @@ mod tests {
     #[case::supported_not_enabled(RowTrackingState::SupportedNotEnabled)]
     #[case::enabled(RowTrackingState::Enabled)]
     #[case::suspended(RowTrackingState::Suspended)]
-    fn test_row_commit_version_patch(#[case] row_tracking_state: RowTrackingState) -> Result<()> {
+    fn test_row_commit_version_patch(
+        #[case] row_tracking_state: RowTrackingState,
+    ) -> KernelResult<()> {
         let schema: SchemaRef = schema_ref! { nullable "value": INTEGER };
         let state_info = get_state_info(
             schema,
@@ -1895,6 +1912,7 @@ mod tests {
                 requested_physical_stats_columns: Vec::new(),
                 is_catalog_managed: false,
                 skip_row_transforms: false,
+                dv_normalization_root: None,
             });
             let checkpoint_info = test_checkpoint_info();
             let processor = ScanLogReplayProcessor::new(
@@ -1932,6 +1950,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         });
         let processor = ScanLogReplayProcessor::new(
             &engine,
@@ -1965,6 +1984,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: true,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         });
         let processor = ScanLogReplayProcessor::new(
             &engine,
@@ -1998,6 +2018,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: skip,
+            dv_normalization_root: None,
         });
         let processor = ScanLogReplayProcessor::new(
             &engine,
@@ -2013,6 +2034,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(deserialized.state_info.skip_row_transforms, skip);
+    }
+
+    fn processor_with_dv_normalization_root(
+        engine: &SyncEngine,
+        dv_normalization_root: Option<Url>,
+    ) -> ScanLogReplayProcessor {
+        let schema: SchemaRef = schema_ref! { nullable "id": INTEGER };
+        let state_info = Arc::new(StateInfo {
+            logical_schema: schema.clone(),
+            physical_schema: schema,
+            physical_predicate: PhysicalPredicate::None,
+            transform_spec: None,
+            column_mapping_mode: ColumnMappingMode::None,
+            physical_stats_schemas: None,
+            physical_partition_schema: None,
+            eligible_physical_stats_columns: HashSet::new(),
+            requested_physical_stats_columns: Vec::new(),
+            is_catalog_managed: false,
+            skip_row_transforms: false,
+            dv_normalization_root,
+        });
+        ScanLogReplayProcessor::new(
+            engine,
+            state_info,
+            test_checkpoint_info(),
+            ScanStatsOptions::default(),
+            ScanPartitionValuesOptions::default(),
+        )
+        .unwrap()
+    }
+
+    #[rstest]
+    fn test_serialization_round_trips_dv_normalization_root(
+        #[values(None, Some("s3://bucket/table/"))] root: Option<&str>,
+    ) {
+        let engine = SyncEngine::new();
+        let root = root.map(|r| Url::parse(r).unwrap());
+        let processor = processor_with_dv_normalization_root(&engine, root.clone());
+        let deserialized = ScanLogReplayProcessor::from_serializable_state(
+            &engine,
+            processor.into_serializable_state().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(deserialized.state_info.dv_normalization_root, root);
+    }
+
+    #[test]
+    fn test_deserialize_blob_without_dv_normalization_root_defaults_to_none() {
+        let engine = SyncEngine::new();
+        let root = Url::parse("s3://bucket/table/").unwrap();
+        let mut state = processor_with_dv_normalization_root(&engine, Some(root))
+            .into_serializable_state()
+            .unwrap();
+        let mut blob: serde_json::Value =
+            serde_json::from_slice(&state.internal_state_blob).unwrap();
+        assert!(blob
+            .as_object_mut()
+            .unwrap()
+            .remove("dv_normalization_root")
+            .is_some());
+        state.internal_state_blob = serde_json::to_vec(&blob).unwrap();
+        let deserialized = ScanLogReplayProcessor::from_serializable_state(&engine, state).unwrap();
+        assert_eq!(deserialized.state_info.dv_normalization_root, None);
     }
 
     #[test]
@@ -2049,6 +2133,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         };
         let predicate = Arc::new(crate::expressions::column_pred!("id"));
         let invalid_blob = serde_json::to_vec(&invalid_internal_state).unwrap();
@@ -2082,13 +2167,14 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         };
         let blob = serde_json::to_string(&invalid_internal_state).unwrap();
         let mut obj: serde_json::Value = serde_json::from_str(&blob).unwrap();
         obj["new_field"] = serde_json::json!("my_new_value");
         let invalid_blob = obj.to_string();
 
-        let res: Result<InternalScanState, _> = serde_json::from_str(&invalid_blob);
+        let res: KernelResult<InternalScanState, _> = serde_json::from_str(&invalid_blob);
         assert_result_error_with_message(res, "unknown field");
     }
 
@@ -2105,7 +2191,7 @@ mod tests {
         obj["new_field"] = serde_json::json!("my_new_value");
         let invalid_blob = obj.to_string();
 
-        let res: Result<SerializableScanState, _> = serde_json::from_str(&invalid_blob);
+        let res: KernelResult<SerializableScanState, _> = serde_json::from_str(&invalid_blob);
         assert_result_error_with_message(res, "unknown field");
     }
 

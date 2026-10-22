@@ -19,7 +19,7 @@ use crate::schema::{
 };
 use crate::table_properties::{TableProperties, COLUMN_MAPPING_MODE};
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{KernelError, KernelResult, Result};
+use crate::{KernelError, KernelResult};
 
 /// Modes of column mapping a table can be in
 #[derive(Debug, EnumString, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
@@ -110,7 +110,10 @@ pub(crate) fn column_mapping_mode(
 ///   ]}}
 /// ]}
 /// ```
-pub fn validate_schema_column_mapping(schema: &Schema, mode: ColumnMappingMode) -> Result<()> {
+pub fn validate_schema_column_mapping(
+    schema: &Schema,
+    mode: ColumnMappingMode,
+) -> KernelResult<()> {
     MakePhysical::validate_schema_column_mapping(mode, schema)
 }
 
@@ -414,14 +417,14 @@ pub(crate) fn assign_column_mapping_metadata(
     schema: &StructType,
     max_id: &mut i64,
     assign_nested_field_ids: bool,
-) -> Result<StructType> {
+) -> KernelResult<StructType> {
     // Assign CM id + physical name to every StructField (top-level and nested).
     // `delta.columnMapping.nested.ids` is assigned later separately, this is to
     // align with delta-spark's behavior.
     let new_fields: Vec<StructField> = schema
         .fields()
         .map(|field| try_assign_flat_column_mapping_info(field, max_id))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     let with_flat_cm_info = StructType::try_new(new_fields)?;
     if !assign_nested_field_ids {
         return Ok(with_flat_cm_info);
@@ -850,11 +853,11 @@ pub(crate) fn get_any_level_column_physical_name(
     schema: &StructType,
     col_name: &ColumnName,
     column_mapping_mode: ColumnMappingMode,
-) -> Result<ColumnName> {
+) -> KernelResult<ColumnName> {
     let fields = schema.fields_of_path(col_name)?;
     let physical_path: Vec<String> = fields
         .iter()
-        .map(|field| -> Result<String> {
+        .map(|field| -> KernelResult<String> {
             if column_mapping_mode != ColumnMappingMode::None {
                 if !field.has_physical_name_annotation() {
                     return Err(KernelError::Schema(format!(
@@ -874,7 +877,7 @@ pub(crate) fn get_any_level_column_physical_name(
 
             Ok(field.physical_name(column_mapping_mode).to_string())
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     Ok(ColumnName::new(physical_path))
 }
 

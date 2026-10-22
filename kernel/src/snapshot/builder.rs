@@ -6,6 +6,7 @@ use delta_kernel_derive::internal_api;
 use tracing::{info, instrument};
 
 use crate::cancellation::CancellationTokenRef;
+use crate::engine::CancellableEngine;
 use crate::log_path::LogPath;
 use crate::log_segment::{validate_catalog_managed_log_tail, LogSegment};
 use crate::log_segment_files::CheckpointHandling;
@@ -14,7 +15,7 @@ use crate::metrics::{MetricId, SnapshotLoadMetricContext, SnapshotLoadType};
 use crate::path::DELTA_LOG_DIR_WITH_SLASH;
 use crate::snapshot::{SnapshotHint, SnapshotRef};
 use crate::utils::{require, try_parse_uri, PhantomType};
-use crate::{Engine, KernelError, KernelResult, Result, Snapshot, Version};
+use crate::{Engine, KernelError, KernelResult, Snapshot, Version};
 
 /// Marker for builders that load a snapshot from a table root.
 #[doc(hidden)]
@@ -31,7 +32,7 @@ pub struct FromSnapshot;
 /// ```no_run
 /// # use delta_kernel::{Snapshot, Engine};
 /// # use url::Url;
-/// # fn example(engine: &dyn Engine) -> delta_kernel::Result<()> {
+/// # fn example(engine: &dyn Engine) -> delta_kernel::KernelResult<()> {
 /// let table_root = Url::parse("file:///path/to/table")?;
 ///
 /// // Build a snapshot
@@ -56,9 +57,7 @@ pub struct SnapshotBuilder<Mode = FromTableRoot> {
     /// Opaque, caller-supplied id recorded on this build's metric events. Not interpreted by
     /// kernel; set via [`with_correlation_id`](Self::with_correlation_id).
     correlation_id: Option<Arc<str>>,
-    /// Optional cooperative cancellation token supplied via
-    /// [`with_cancellation_token`](Self::with_cancellation_token). `None` means the build is not
-    /// cancellable.
+    /// Optional cooperative cancellation token for this build's handler-backed reads.
     cancellation_token: Option<CancellationTokenRef>,
     // Carries the zero-sized typestate that limits mode-specific methods at compile time.
     mode: PhantomType<Mode>,
@@ -291,10 +290,14 @@ impl<Mode> SnapshotBuilder<Mode> {
     /// Supply a [`CancellationToken`] for snapshot builds that list or read the log.
     ///
     /// Kernel forwards the token (if any) to cancellation-aware [`Engine`] listing and read
-    /// operations, and [`build`](Self::build) fails with [`KernelError::Cancelled`] if cancellation
-    /// is observed before they complete. Snapshot-hint builds perform no listing or reads, so
-    /// the token has no effect on them. By default (or when passing `None`), the build is not
-    /// cancellable.
+    /// operations, including CRC and imperative protocol/metadata replay. Declarative plan
+    /// execution does not use this token. The build fails with [`KernelError::Cancelled`] if
+    /// cancellation is observed during these reads. Snapshot-hint builds perform no listing or
+    /// reads, so the token has no effect on them. By default (or when passing `None`), the
+    /// supplied engine's cancellation behavior is unchanged.
+    ///
+    /// This token applies only to the build and is not retained by the snapshot. Builds run
+    /// synchronously and may block on I/O, including when a cancellation token is supplied.
     ///
     /// [`CancellationToken`]: crate::CancellationToken
     /// [`KernelError::Cancelled`]: crate::KernelError::Cancelled
@@ -352,7 +355,7 @@ impl<Mode> SnapshotBuilder<Mode> {
         fields(path = %self.table_path(), report, enable_call_frame, version = tracing::field::Empty, operation_id = %self.operation_id, is_catalog_managed = self.max_catalog_version.is_some(), correlation_id = self.correlation_id.as_deref().unwrap_or(""), load_type = self.load_type().as_ref()),
         err
     )]
-    pub fn build(self, engine: &dyn Engine) -> Result<SnapshotRef> {
+    pub fn build(self, engine: &dyn Engine) -> KernelResult<SnapshotRef> {
         // Fold the context into the message string rather than passing structured fields: this
         // `info!` fires inside the `snap.build` metrics span, where any field the
         // `SnapshotBuildSuccess` event doesn't recognize would trip a spurious "Invalid field"
@@ -399,6 +402,11 @@ impl<Mode> SnapshotBuilder<Mode> {
                 incremental_replay,
             )?
         } else {
+            let scoped_engine =
+                cancellation_token.map(|token| CancellableEngine::new(engine, token));
+            let engine = scoped_engine
+                .as_ref()
+                .map_or(engine, |engine| engine as &dyn Engine);
             let log_tail: Vec<_> = log_tail.into_iter().map(Into::into).collect();
 
             // Pre-build validations for catalog-managed tables
@@ -421,7 +429,7 @@ impl<Mode> SnapshotBuilder<Mode> {
                     log_tail,
                     effective_version,
                     metric_context.clone(),
-                    cancellation_token.as_ref(),
+                    None,
                 )?;
                 Snapshot::try_new_from_log_segment(
                     table_url,
@@ -447,7 +455,6 @@ impl<Mode> SnapshotBuilder<Mode> {
                     incremental_replay,
                     checkpoint_handling,
                     built_as_latest,
-                    cancellation_token.as_ref(),
                 )?
             }
         };
@@ -561,7 +568,7 @@ pub(super) mod tests {
     pub(in crate::snapshot) async fn create_table(
         store: &Arc<DynObjectStore>,
         table_root: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         add_commit(
             table_root,
             store.as_ref(),
@@ -584,7 +591,7 @@ pub(super) mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_snapshot_builder() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_snapshot_builder() -> KernelResult<(), Box<dyn std::error::Error>> {
         let (engine, store, table_root) = setup_test();
         let engine = engine.as_ref();
         create_table(&store, &table_root).await?;
@@ -601,7 +608,7 @@ pub(super) mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_snapshot_with_unsupported_type() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_snapshot_with_unsupported_type() -> KernelResult<()> {
         let (engine, store, table_root) = setup_test();
         let engine = engine.as_ref();
 
@@ -663,7 +670,7 @@ pub(super) mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn snapshot_failed_emits_metric_on_error() -> Result<(), Box<dyn std::error::Error>> {
+    async fn snapshot_failed_emits_metric_on_error() -> KernelResult<()> {
         let (engine, store, table_root) = setup_test();
 
         // Unsupported schema type forces a build failure
@@ -709,8 +716,7 @@ pub(super) mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn log_segment_load_failure_emits_metric_on_empty_log(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn log_segment_load_failure_emits_metric_on_empty_log() -> KernelResult<()> {
         let (engine, _store, table_root) = setup_test();
         let (reporter, _guard) = measuring_reporter();
 
@@ -732,7 +738,7 @@ pub(super) mod tests {
 
     #[test_log::test(tokio::test)]
     async fn protocol_metadata_load_failure_emits_metric_when_actions_absent(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         let (engine, store, table_root) = setup_test();
         // A commit with no protocol/metadata: the segment lists fine, then the read fails.
         add_commit(
@@ -765,8 +771,8 @@ pub(super) mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn snapshot_update_from_existing_emits_metric() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn snapshot_update_from_existing_emits_metric(
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         let (engine, store, table_root) = setup_test();
         create_table(&store, &table_root).await?;
 
@@ -796,7 +802,7 @@ pub(super) mod tests {
 
     #[test_log::test(tokio::test)]
     async fn snapshot_update_to_earlier_version_emits_failed_metric(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         let (engine, store, table_root) = setup_test();
         create_table(&store, &table_root).await?;
 
@@ -832,7 +838,7 @@ pub(super) mod tests {
 
     #[test_log::test(tokio::test)]
     async fn snapshot_completed_duration_exceeds_log_segment_load_duration(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         let (engine, store, table_root) = setup_test();
         create_table(&store, &table_root).await?;
 
@@ -872,7 +878,7 @@ pub(super) mod tests {
     #[test_log::test(tokio::test)]
     async fn snapshot_build_and_child_events_carry_correlation_id(
         #[case] correlation_id: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         let (engine, store, table_root) = setup_test();
         create_table(&store, &table_root).await?;
 
@@ -963,7 +969,7 @@ pub(super) mod tests {
         #[test_log::test(tokio::test)]
         async fn test_staged_commits_without_max_catalog_version_errors(
             #[values(None, Some(1))] requested_version: Option<Version>,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let path1 =
                 add_staged_commit(&table_root, store.as_ref(), 1, String::from("{}")).await?;
@@ -982,8 +988,7 @@ pub(super) mod tests {
         }
 
         #[test_log::test(tokio::test)]
-        async fn test_version_exceeds_max_catalog_version_errors(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_version_exceeds_max_catalog_version_errors() -> KernelResult<()> {
             let (engine, _store, table_root) = setup_catalog_managed_test().await;
 
             let result = SnapshotBuilder::new_for(table_root)
@@ -998,7 +1003,7 @@ pub(super) mod tests {
 
         #[test_log::test(tokio::test)]
         async fn test_log_tail_last_version_mismatch_errors(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let actions = vec![TestAction::Add("file_1.parquet".to_string())];
             add_commit(&table_root, store.as_ref(), 1, actions_to_string(actions)).await?;
@@ -1022,8 +1027,8 @@ pub(super) mod tests {
         }
 
         #[test_log::test(tokio::test)]
-        async fn test_catalog_managed_table_without_max_catalog_version_errors(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_catalog_managed_table_without_max_catalog_version_errors() -> KernelResult<()>
+        {
             let (engine, _store, table_root) = setup_catalog_managed_test().await;
 
             let result = SnapshotBuilder::new_for(table_root).build(engine.as_ref());
@@ -1035,7 +1040,7 @@ pub(super) mod tests {
 
         #[test_log::test(tokio::test)]
         async fn test_non_catalog_managed_snapshot_trusts_supplied_catalog_bound(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_test();
 
             let actions = vec![TestAction::Metadata];
@@ -1062,7 +1067,7 @@ pub(super) mod tests {
             #[values(None, Some(1), Some(2), Some(3))] requested_version: Option<Version>,
             #[values(false, true)] with_catalog_bound: bool,
             #[values(false, true)] incremental: bool,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let engine = Arc::new(MeteredDeltaEngine::new(engine));
             let base = SnapshotBuilder::new_for(&table_root)
@@ -1165,7 +1170,7 @@ pub(super) mod tests {
             #[values(false, true)] published: bool,
             #[values(false, true)] incremental: bool,
             #[values(false, true)] checkpointed: bool,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_test();
             let engine = Arc::new(MeteredDeltaEngine::new(engine));
             let initial_actions = actions_to_string_catalog_managed(vec![TestAction::Metadata])
@@ -1249,7 +1254,7 @@ pub(super) mod tests {
             #[case] supplied_staged: Option<bool>,
             #[case] changed_metadata: bool,
             #[values(false, true)] staged_snapshot: bool,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let engine = Arc::new(MeteredDeltaEngine::new(engine));
             let downgrade = json!({
@@ -1308,7 +1313,7 @@ pub(super) mod tests {
         async fn test_staged_catalog_downgrade_time_travel_respects_catalog_bound(
             #[values(0, 1, 2)] max_catalog_version: Version,
             #[values(false, true)] published: bool,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let downgrade = json!({
                 "protocol": Protocol::try_new_modern(
@@ -1339,7 +1344,7 @@ pub(super) mod tests {
         #[test_log::test(tokio::test)]
         async fn test_catalog_downgrade_stays_bounded_after_publication_without_io_on_reuse(
             #[values(false, true)] with_checksum: bool,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let engine = Arc::new(MeteredDeltaEngine::new(engine));
             let downgrade = format!(
@@ -1456,7 +1461,7 @@ pub(super) mod tests {
         async fn test_catalog_downgrade_and_reupgrade_follow_catalog_bound(
             #[case] catalog_feature: &str,
             #[values(false, true)] incremental: bool,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_test();
             add_commit(
                 &table_root,
@@ -1565,7 +1570,7 @@ pub(super) mod tests {
         #[test_log::test(tokio::test)]
         async fn test_catalog_downgrade_reuses_loaded_state_but_fresh_replay_propagates_errors(
             #[case] replacement_commit: Option<&str>,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let downgrade = json!({
                 "protocol": Protocol::try_new_modern(
@@ -1607,7 +1612,7 @@ pub(super) mod tests {
 
         #[test_log::test(tokio::test)]
         async fn test_log_tail_last_version_less_than_time_travel_version_errors(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let actions = vec![TestAction::Add("file_1.parquet".to_string())];
             add_commit(&table_root, store.as_ref(), 1, actions_to_string(actions)).await?;
@@ -1631,7 +1636,7 @@ pub(super) mod tests {
 
         #[test_log::test(tokio::test)]
         async fn test_max_catalog_version_as_effective_version(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let actions = vec![TestAction::Add("file_1.parquet".to_string())];
             add_commit(&table_root, store.as_ref(), 1, actions_to_string(actions)).await?;
@@ -1649,7 +1654,7 @@ pub(super) mod tests {
 
         #[test_log::test(tokio::test)]
         async fn test_time_travel_with_max_catalog_version(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let actions = vec![TestAction::Add("file_1.parquet".to_string())];
             add_commit(&table_root, store.as_ref(), 1, actions_to_string(actions)).await?;
@@ -1666,7 +1671,7 @@ pub(super) mod tests {
 
         #[test_log::test(tokio::test)]
         async fn test_builder_from_catalog_managed_without_mcv_errors(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let actions = vec![TestAction::Add("file_1.parquet".to_string())];
             add_commit(&table_root, store.as_ref(), 1, actions_to_string(actions)).await?;
@@ -1693,7 +1698,7 @@ pub(super) mod tests {
             #[case] commit_versions: Vec<u64>,
             #[case] log_tail_versions: Vec<u64>,
             #[case] mcv: u64,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> KernelResult<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             for v in &commit_versions {
                 let actions = vec![TestAction::Add(format!("file_{v}.parquet"))];

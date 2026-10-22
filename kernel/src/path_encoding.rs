@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 
 /// Characters encoded by [`uri_encode_path`]: `%`, space, and ASCII chars illegal in a
 /// URI path, plus all ASCII controls via [`CONTROLS`]. Non-ASCII UTF-8 bytes are ALSO
@@ -40,6 +40,12 @@ pub(crate) const HADOOP_URI_PATH_ENCODE_SET: &AsciiSet = &CONTROLS
 /// [`Cow::Borrowed`] when no encoding is needed (zero-allocation fast path).
 pub(crate) fn uri_encode_path(path: &str) -> Cow<'_, str> {
     utf8_percent_encode(path, HADOOP_URI_PATH_ENCODE_SET).into()
+}
+
+/// Percent-decodes a URI path component back into its raw form. Returns `None` if the decoded
+/// bytes are not valid UTF-8.
+pub(crate) fn uri_decode_path(path: &str) -> Option<Cow<'_, str>> {
+    percent_decode_str(path).decode_utf8().ok()
 }
 
 #[cfg(test)]

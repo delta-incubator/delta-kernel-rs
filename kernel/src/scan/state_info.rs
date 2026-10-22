@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use tracing::{debug, enabled, warn, Level};
+use url::Url;
 
 use crate::actions::NULL_COUNT;
 use crate::expressions::ColumnName;
@@ -136,6 +137,8 @@ pub(crate) struct StateInfo {
     /// so the scan can still describe the transform structurally. Set by
     /// [`ScanBuilder::without_row_transforms`](crate::scan::ScanBuilder::without_row_transforms).
     pub(crate) skip_row_transforms: bool,
+    /// Table root for normalizing paths. `Some` iff adaptiveMetadata is enabled.
+    pub(crate) dv_normalization_root: Option<Url>,
 }
 
 /// Validating the metadata columns also extracts information needed to properly construct the full
@@ -261,12 +264,14 @@ fn build_data_skipping_schemas(
     let build_stats_schema = |required: Option<&[ColumnName]>,
                               requested: Option<&[ColumnName]>|
      -> KernelResult<Option<SchemaRef>> {
-        let stats_schema = table_configuration
+        let builder = table_configuration
             .stats_schema_builder()
             .with_required_physical_columns(required)
             .with_requested_physical_columns(requested)
-            .with_variant_min_max(stats.variant_min_max)
-            .build()?;
+            .with_variant_min_max(stats.variant_min_max);
+        #[cfg(feature = "geo-type-in-dev")]
+        let builder = builder.with_geometry_min_max(stats.geometry_min_max);
+        let stats_schema = builder.build()?;
         Ok(stats_schema
             .field(NULL_COUNT)
             .is_some()
@@ -634,6 +639,7 @@ impl StateInfo {
             requested_physical_stats_columns,
             is_catalog_managed: table_configuration.is_catalog_managed(),
             skip_row_transforms: false,
+            dv_normalization_root: table_configuration.dv_normalization_root(),
         })
     }
 
@@ -679,12 +685,16 @@ pub(crate) mod tests {
     use super::*;
     use crate::actions::{MAX_VALUES, MIN_VALUES};
     use crate::expressions::{col, column_name, lit, Predicate as Pred};
+    #[cfg(feature = "geo-type-in-dev")]
+    use crate::scan::build_stats_output_schemas;
+    #[cfg(feature = "geo-type-in-dev")]
+    use crate::schema::GeometryType;
     use crate::schema::{schema, schema_ref, ColumnMetadataKey, MetadataValue};
     use crate::table_features::TableFeature;
     use crate::unit_test_utils::{
         assert_result_error_with_message, MockProtocolBuilder, MockTableConfigurationBuilder,
     };
-    use crate::Result;
+    use crate::KernelResult;
 
     #[test]
     fn stats_schemas_can_both_be_absent() {
@@ -759,7 +769,7 @@ pub(crate) mod tests {
     pub(crate) fn get_simple_state_info(
         schema: SchemaRef,
         partition_columns: Vec<String>,
-    ) -> Result<StateInfo> {
+    ) -> KernelResult<StateInfo> {
         get_state_info(schema, partition_columns, None, &[], HashMap::new(), vec![])
     }
 
@@ -772,7 +782,7 @@ pub(crate) mod tests {
         features: &[TableFeature],
         metadata_configuration: HashMap<String, String>,
         metadata_cols: Vec<(&str, MetadataColumnSpec)>,
-    ) -> Result<StateInfo> {
+    ) -> KernelResult<StateInfo> {
         get_state_info_with_stats(
             schema,
             partition_columns,
@@ -792,7 +802,7 @@ pub(crate) mod tests {
         metadata_configuration: HashMap<String, String>,
         metadata_cols: Vec<(&str, MetadataColumnSpec)>,
         stats: StatsOptions,
-    ) -> Result<StateInfo> {
+    ) -> KernelResult<StateInfo> {
         get_state_info_with_options(
             schema,
             partition_columns,
@@ -815,7 +825,7 @@ pub(crate) mod tests {
         metadata_cols: Vec<(&str, MetadataColumnSpec)>,
         stats: StatsOptions,
         partition_values: PartitionValuesOptions,
-    ) -> Result<StateInfo> {
+    ) -> KernelResult<StateInfo> {
         let builder = MockTableConfigurationBuilder::new()
             .with_schema(schema.clone())
             .with_partition_columns(partition_columns)
@@ -1660,6 +1670,129 @@ pub(crate) mod tests {
             &["phys_a", "phys_b"],
             &["col_a", "col_b", "phys_c"],
         );
+    }
+
+    #[cfg(feature = "geo-type-in-dev")]
+    #[rstest]
+    #[case::indexed(StatsOptions::all_struct(), None, [true, true, false])]
+    #[case::extra(
+        StatsOptions::all_struct_with_extra_indexed(vec![column_name!("nested.g")]),
+        None,
+        [true, true, true]
+    )]
+    #[case::selected(
+        StatsOptions::struct_columns(vec![column_name!("nested.g")]),
+        None,
+        [false, false, true]
+    )]
+    #[case::table_columns(StatsOptions::all_struct(), Some("nested.g"), [false, false, true])]
+    #[case::table_struct(StatsOptions::all_struct(), Some("nested"), [false, false, true])]
+    fn geometry_stats_read_and_output_schemas_preserve_selection_mapping_and_crs(
+        #[case] stats: StatsOptions,
+        #[case] stats_columns: Option<&str>,
+        #[case] included: [bool; 3],
+        #[values(
+            ColumnMappingMode::None,
+            ColumnMappingMode::Name,
+            ColumnMappingMode::Id
+        )]
+        mapping: ColumnMappingMode,
+        #[values(false, true)] geometry_min_max: bool,
+    ) {
+        let geometry = DataType::from(GeometryType::try_new("EPSG:4326").unwrap());
+        let nested_geometry = DataType::from(GeometryType::try_new("EPSG:3857").unwrap());
+        let schema = schema_ref! {
+            (cm_field("part", 1, "phys_part", DataType::LONG)),
+            (cm_field("id", 2, "phys_id", DataType::LONG)),
+            (cm_field("g", 3, "phys_g", geometry.clone())),
+            (cm_field("nested", 4, "phys_nested", schema! {
+                (cm_field("g", 5, "phys_nested_g", nested_geometry.clone())),
+            })),
+        };
+        let mut builder = MockTableConfigurationBuilder::new()
+            .with_schema(schema.clone())
+            .with_partition_columns(["part"])
+            .with_column_mapping(mapping)
+            .with_properties([("delta.dataSkippingNumIndexedCols", "2")])
+            .with_protocol(
+                MockProtocolBuilder::new()
+                    .with_features([TableFeature::GeospatialType, TableFeature::ColumnMapping])
+                    .build(),
+            );
+        if let Some(columns) = stats_columns {
+            builder = builder.with_properties([("delta.dataSkippingStatsColumns", columns)]);
+        }
+        let config = builder.build();
+        let stats = stats.with_geometry_min_max_stats(geometry_min_max);
+        let output = build_stats_output_schemas(&config, &stats)
+            .unwrap()
+            .unwrap();
+        let state = StateInfo::try_new(
+            schema.clone(),
+            schema,
+            &config,
+            None,
+            &stats,
+            &PartitionValuesOptions::default(),
+            (),
+        )
+        .unwrap();
+        assert_eq!(state.physical_stats_read_schema(), Some(&output.physical));
+        assert_eq!(state.physical_stats_output_schema(), Some(&output.physical));
+
+        let columns = [
+            (vec!["id"], vec!["phys_id"], DataType::LONG),
+            (vec!["g"], vec!["phys_g"], geometry),
+            (
+                vec!["nested", "g"],
+                vec!["phys_nested", "phys_nested_g"],
+                nested_geometry,
+            ),
+        ];
+        for (index, (logical, physical, data_type)) in columns.iter().enumerate() {
+            for (schema, path) in [
+                (&output.logical, logical),
+                (
+                    &output.physical,
+                    if mapping == ColumnMappingMode::None {
+                        logical
+                    } else {
+                        physical
+                    },
+                ),
+            ] {
+                for stat_name in [NULL_COUNT, MIN_VALUES, MAX_VALUES] {
+                    let path =
+                        ColumnName::new(std::iter::once(stat_name).chain(path.iter().copied()));
+                    let field = schema.field_at(&path).ok();
+                    let present = included[index]
+                        && (stat_name == NULL_COUNT || index == 0 || geometry_min_max);
+                    assert_eq!(field.is_some(), present, "{path}");
+                    if let Some(field) = field {
+                        let expected = if stat_name == NULL_COUNT {
+                            &DataType::LONG
+                        } else {
+                            data_type
+                        };
+                        assert_eq!(field.data_type(), expected, "{path}");
+                        assert!(field.is_nullable());
+                        assert!(field.metadata.is_empty());
+                    }
+                }
+            }
+        }
+        assert!(output
+            .logical
+            .field_at(&column_name!("nullCount.part"))
+            .is_err());
+        // Scan requests do not change the default schema used by writers and other callers.
+        let default_schema = config.stats_schema_builder().build().unwrap();
+        assert!(default_schema
+            .field_at(&column_name!("minValues.g"))
+            .is_err());
+        assert!(default_schema
+            .field_at(&column_name!("minValues.phys_g"))
+            .is_err());
     }
 
     // === eligible_physical_stats_columns trims the predicate-derived stats schema ===

@@ -131,7 +131,8 @@ int main(int argc, char* argv[]) {
   const char* engine_info_str = "create_table_example";
   KernelStringSlice engine_info_slice = { engine_info_str, strlen(engine_info_str) };
   ExternResultHandleExclusiveCreateTableTransactionBuilder builder_res =
-      new_create_table_txn_builder(table_path_slice, &engine_schema, engine_info_slice, engine);
+      new_create_table_txn_builder(
+          table_path_slice, &engine_schema, engine_info_slice, /* data_change */ true, engine);
   if (builder_res.tag != OkHandleExclusiveCreateTableTransactionBuilder) {
     print_error("Failed to get create-table builder.", (Error*)builder_res.err);
     free_error((Error*)builder_res.err);

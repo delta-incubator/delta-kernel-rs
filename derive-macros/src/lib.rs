@@ -11,7 +11,18 @@ use syn::{
     Fields, Item, ItemMacro, Lit, Meta, PathArguments, Token, Type, Visibility,
 };
 
+mod expr_macro;
 mod schema_macro;
+
+/// Backend for `delta_kernel::expressions::expr!`. Input is a Kernel crate path, a semicolon,
+/// and an expression; invalid syntax or constructors produce a compile error.
+#[doc(hidden)]
+#[proc_macro]
+pub fn expr(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    expr_macro::expand(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
 
 // Builds a `StructType`; see `delta_kernel::schema::schema` re-export for details.
 #[doc(hidden)]
@@ -26,7 +37,7 @@ pub fn schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 pub fn try_schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     // Wrap the block in a closure that anchors the block's `?` operators
     schema_macro::parse_schema(input, true, |block| {
-        quote! { (|| -> delta_kernel::Result<_> #block)() }
+        quote! { (|| -> delta_kernel::KernelResult<_> #block)() }
     })
 }
 
@@ -532,7 +543,7 @@ fn try_from_struct_data_impl(input: &DeriveInput) -> Result<TokenStream, Error> 
 
             fn try_from(
                 value: delta_kernel::expressions::StructData,
-            ) -> delta_kernel::Result<Self> {
+            ) -> delta_kernel::KernelResult<Self> {
                 let mut fields =
                     delta_kernel::schema::derive_macro_utils::StructDataFields::try_new(
                         value,
@@ -558,7 +569,7 @@ fn try_from_struct_data_impl(input: &DeriveInput) -> Result<TokenStream, Error> 
 
             fn try_from(
                 value: delta_kernel::expressions::Scalar,
-            ) -> delta_kernel::Result<Self> {
+            ) -> delta_kernel::KernelResult<Self> {
                 match value {
                     delta_kernel::expressions::Scalar::Struct(data) => data.try_into(),
                     other => Err(other.conversion_error(stringify!(#struct_name))),

@@ -2,6 +2,17 @@
 
 This crate provides a C foreign function interface (ffi) for delta-kernel-rs.
 
+## Selecting scan statistics
+
+Pass `FfiStatsOptions` to `scan_builder_with_stats` to choose JSON output, indexed structured
+statistics, or logical column paths through `StructColumns` and `AllStructWithExtraIndexed`.
+The setter replaces previous statistics options, borrows the engine and options, and copies column
+paths before returning. It consumes the builder on success and error.
+
+`FfiStatsOptions` is now a tagged union rather than a scalar enum. The setter takes a pointer to
+the options and an engine handle, and returns an `ExternResult`. This changes the C ABI: rebuild
+connectors against the regenerated headers and update their calls together with the native library.
+
 ## Building an update transaction
 
 Connectors configure transaction intent on a builder and use the built transaction for
@@ -12,12 +23,10 @@ setter, and commit calls borrow the engine handle. The caller retains ownership.
 
 ```c
 HandleSharedSnapshot snapshot = /* unwrap(snapshot_builder_build(...)) */;
-HandleExclusiveUpdateTableTransactionBuilder builder = new_update_table_txn_builder(snapshot);
-builder = unwrap(update_table_txn_builder_with_engine_info(
-    builder, slice("my-engine/1.0"), engine));
-builder = update_table_txn_builder_with_operation(
-    builder, KernelUpdateTableOperationWrite);
-builder = update_table_txn_builder_with_data_change(builder, true);
+HandleExclusiveUpdateTableTransactionBuilder builder =
+    unwrap(new_update_table_txn_builder(
+        snapshot, KernelUpdateTableOperationWrite, slice("my-engine/1.0"),
+        /* data_change */ true, engine));
 
 HandleExclusiveUpdateTableTransaction txn = unwrap(update_table_txn_builder_build(builder, engine));
 /* Write files, then call update_table_txn_add_files(txn, metadata). */
@@ -29,6 +38,24 @@ free_committed_transaction(committed);
 
 Here `slice` and `unwrap` stand for the connector's usual `KernelStringSlice` and `ExternResult`
 helpers.
+
+The update operation, engine info, and `data_change` are required at construction and cannot be changed.
+For connector-defined names, use
+`new_update_table_txn_builder_with_custom_operation(snapshot, name, engine_info, data_change, engine)`.
+Both constructors validate UTF-8 before retaining the snapshot and borrow all inputs.
+The create-table constructor also requires `data_change` before the engine handle.
+
+Use `data_change = true` for logical data changes and `false` for metadata-only changes or
+data-preserving rewrites. Build validation rejects `KernelUpdateTableOperationAlterTable` with
+`true` and blind append with `false`. Configure schema operations before building in both
+standalone ALTER TABLE and schema-evolution transactions. See
+[ALTER TABLE versus schema evolution](../docs/user-guide/src/writing/alter_table.md).
+
+The typed constructor returns an `ExternResult`, not a bare builder handle. When migrating from
+setter-based configuration, update constructor calls and rebuild C/C++ connectors against the
+generated headers. The typed constructor's parameters and return type are not ABI-compatible.
+The `update_table_txn_builder_with_operation`, `update_table_txn_builder_with_custom_operation`,
+and `update_table_txn_builder_with_engine_info` setters are removed.
 
 Create-table connectors use the same shape: call `new_create_table_txn_builder`, apply
 `create_table_txn_builder_with_*` functions, then call `create_table_txn_builder_build`. Application
@@ -82,7 +109,7 @@ make
 ./read_table ../../../../kernel/tests/data/table-with-dv-small
 ```
 
-Note there are two configurations that can currently be configured in cmake:
+Available CMake options include:
 ```bash
 # turn on VERBOSE mode (default is off) - print more diagnostics
 $ cmake -DVERBOSE=yes ..
@@ -101,6 +128,10 @@ cmake -DPRINT_DATA=no ..
 ```
 
 and the example will only print out the schema of the table, not the data.
+
+The [UDT annotation test instructions](examples/read-table/README.md#udt-annotation-tests) describe
+building the Rust library with `udt-in-dev` and enabling CMake's `UDT_IN_DEV=ON` option to run the
+schema round-trip test.
 
 ### 2. Visit Expression Example (`examples/visit-expression`)
 

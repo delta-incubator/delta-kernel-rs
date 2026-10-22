@@ -12,11 +12,11 @@ use crate::arrow::datatypes::{
 };
 use crate::engine::arrow_data::{extract_record_batch, ArrowEngineData};
 use crate::engine::arrow_utils::apply_schema::{apply_schema, apply_schema_to};
-use crate::error::{KernelError, Result};
+use crate::error::{KernelError, KernelResult};
 use crate::expressions::{ArrayData, Expression, ExpressionRef, PredicateRef, Scalar};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
 use crate::utils::require;
-use crate::{EngineData, EvaluationHandler, ExpressionEvaluator, KernelResult, PredicateEvaluator};
+use crate::{EngineData, EvaluationHandler, ExpressionEvaluator, PredicateEvaluator};
 
 pub mod evaluate_expression;
 pub mod opaque;
@@ -29,7 +29,7 @@ mod tests;
 
 impl Scalar {
     /// Convert scalar to arrow array.
-    pub fn to_array(&self, num_rows: usize) -> Result<ArrayRef> {
+    pub fn to_array(&self, num_rows: usize) -> KernelResult<ArrayRef> {
         let data_type = ArrowDataType::try_from_kernel(&self.data_type())?;
         let mut builder = array::make_builder(&data_type, num_rows);
         self.append_to(&mut builder, num_rows)?;
@@ -174,9 +174,7 @@ impl Scalar {
         match *data_type {
             #[cfg(feature = "udt-in-dev")]
             DataType::UserDefined(_) => {
-                return Err(KernelError::unsupported(
-                    "UDT expressions are not yet supported",
-                ))
+                Self::append_null(builder, data_type.physical_type(), num_rows)?
             }
             DataType::INTEGER => append_nulls_as!(array::Int32Builder),
             DataType::LONG => append_nulls_as!(array::Int64Builder),
@@ -239,7 +237,7 @@ impl Scalar {
 
 impl ArrayData {
     /// Convert kernel [`ArrayData`] to an Arrow [`ArrayRef`] of the equivalent type.
-    pub fn to_arrow(&self) -> Result<ArrayRef> {
+    pub fn to_arrow(&self) -> KernelResult<ArrayRef> {
         let arrow_data_type = ArrowDataType::try_from_kernel(self.array_type().element_type())?;
 
         let elements = self.array_elements();
@@ -261,7 +259,7 @@ impl EvaluationHandler for ArrowEvaluationHandler {
         schema: SchemaRef,
         expression: ExpressionRef,
         output_type: DataType,
-    ) -> Result<Arc<dyn ExpressionEvaluator>> {
+    ) -> KernelResult<Arc<dyn ExpressionEvaluator>> {
         Ok(Arc::new(DefaultExpressionEvaluator {
             input_schema: schema,
             expression,
@@ -273,7 +271,7 @@ impl EvaluationHandler for ArrowEvaluationHandler {
         &self,
         schema: SchemaRef,
         predicate: PredicateRef,
-    ) -> Result<Arc<dyn PredicateEvaluator>> {
+    ) -> KernelResult<Arc<dyn PredicateEvaluator>> {
         Ok(Arc::new(DefaultPredicateEvaluator {
             input_schema: schema,
             predicate,
@@ -284,7 +282,7 @@ impl EvaluationHandler for ArrowEvaluationHandler {
         &self,
         schema: SchemaRef,
         rows: Vec<Vec<Scalar>>,
-    ) -> Result<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         let arrow_schema: Arc<ArrowSchema> = Arc::new(schema.as_ref().try_into_arrow()?);
         if rows.is_empty() {
             return Ok(Box::new(ArrowEngineData::new(RecordBatch::new_empty(
@@ -343,7 +341,7 @@ pub struct DefaultExpressionEvaluator {
 }
 
 impl ExpressionEvaluator for DefaultExpressionEvaluator {
-    fn evaluate(&self, batch: &dyn EngineData) -> Result<Box<dyn EngineData>> {
+    fn evaluate(&self, batch: &dyn EngineData) -> KernelResult<Box<dyn EngineData>> {
         debug!("Arrow evaluator evaluating: {:#?}", self.expression);
         let batch = extract_record_batch(batch)?;
         // TODO(#3263): Validate nested fields.
@@ -383,7 +381,7 @@ pub struct DefaultPredicateEvaluator {
 }
 
 impl PredicateEvaluator for DefaultPredicateEvaluator {
-    fn evaluate(&self, batch: &dyn EngineData) -> Result<Box<dyn EngineData>> {
+    fn evaluate(&self, batch: &dyn EngineData) -> KernelResult<Box<dyn EngineData>> {
         debug!("Arrow evaluator evaluating: {:#?}", self.predicate);
         let batch = extract_record_batch(batch)?;
         // TODO(#3263): Validate nested fields.
@@ -450,6 +448,7 @@ fn validate_data_schema_top_level(
 ///
 /// Unlike a full conversion, this does not inspect nested types or field metadata.
 fn top_level_types_compatible(expected_type: &DataType, data_type: &ArrowDataType) -> bool {
+    let expected_type = expected_type.physical_type();
     match (expected_type, data_type) {
         // Dictionary types have the same logical type as their values.
         (_, ArrowDataType::Dictionary(_, value_type)) => {

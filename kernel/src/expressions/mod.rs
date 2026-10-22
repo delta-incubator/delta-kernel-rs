@@ -14,6 +14,8 @@ pub use self::column_names::{
     col, column_expr_ref, column_name, column_pred, joined_column_expr, joined_column_name,
     ColumnName,
 };
+#[doc(inline)]
+pub use self::macros::expr;
 pub use self::scalars::{ArrayData, DecimalData, MapData, Scalar, StructData};
 use crate::kernel_predicates::{
     DirectDataSkippingPredicateEvaluator, DirectPredicateEvaluator,
@@ -23,9 +25,10 @@ use crate::schema::SchemaRef;
 pub use crate::struct_patch::{ExpressionFieldPatch, ExpressionStructPatch};
 use crate::transforms::{transform_output_type, ExpressionTransform};
 use crate::utils::CollectInto;
-use crate::{DataType, DynPartialEq, KernelError, Result};
+use crate::{DataType, DynPartialEq, KernelError, KernelResult};
 
 mod column_names;
+mod macros;
 mod scalars;
 mod sql;
 pub(crate) use self::sql::parse_sql;
@@ -242,7 +245,7 @@ pub trait OpaqueExpressionOp: DynPartialEq + std::fmt::Debug {
         &self,
         eval_expr: &ScalarExpressionEvaluator<'_>,
         exprs: &[Expression],
-    ) -> Result<Scalar>;
+    ) -> KernelResult<Scalar>;
 }
 
 /// An opaque predicate operation (ie defined and implemented by the engine).
@@ -268,7 +271,7 @@ pub trait OpaquePredicateOp: DynPartialEq + std::fmt::Debug {
         eval_pred: &DirectPredicateEvaluator<'_>,
         exprs: &[Expression],
         inverted: bool,
-    ) -> Result<Option<bool>>;
+    ) -> KernelResult<Option<bool>>;
 
     /// Evaluates this (possibly inverted) opaque predicate for data skipping on behalf of a
     /// [`DirectDataSkippingPredicateEvaluator`], e.g. for parquet row group skipping.
@@ -422,14 +425,16 @@ pub struct OpaquePredicate {
 fn fail_serialize_opaque_predicate<S>(
     _value: &OpaquePredicate,
     _serializer: S,
-) -> Result<S::Ok, S::Error>
+) -> KernelResult<S::Ok, S::Error>
 where
     S: Serializer,
 {
     Err(ser::Error::custom("Cannot serialize an Opaque Predicate"))
 }
 
-fn fail_deserialize_opaque_predicate<'de, D>(_deserializer: D) -> Result<OpaquePredicate, D::Error>
+fn fail_deserialize_opaque_predicate<'de, D>(
+    _deserializer: D,
+) -> KernelResult<OpaquePredicate, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -471,7 +476,7 @@ impl OpaqueExpression {
 fn fail_serialize_opaque_expression<S>(
     _value: &OpaqueExpression,
     _serializer: S,
-) -> Result<S::Ok, S::Error>
+) -> KernelResult<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -480,7 +485,7 @@ where
 
 fn fail_deserialize_opaque_expression<'de, D>(
     _deserializer: D,
-) -> Result<OpaqueExpression, D::Error>
+) -> KernelResult<OpaqueExpression, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -875,7 +880,7 @@ impl Expression {
     /// # Errors
     ///
     /// Returns an error if the supplied patch builder contains conflicting operations.
-    pub fn struct_patch<P>(patch: P) -> Result<Self>
+    pub fn struct_patch<P>(patch: P) -> KernelResult<Self>
     where
         P: TryInto<ExpressionStructPatch>,
         KernelError: From<P::Error>,
@@ -1902,7 +1907,7 @@ mod tests {
         #[test]
         fn test_opaque_expression_serialize_fails() {
             use crate::expressions::{OpaqueExpressionOp, ScalarExpressionEvaluator};
-            use crate::Result;
+            use crate::KernelResult;
 
             #[derive(Debug, PartialEq)]
             struct TestOpaqueExprOp;
@@ -1915,7 +1920,7 @@ mod tests {
                     &self,
                     _eval_expr: &ScalarExpressionEvaluator<'_>,
                     _exprs: &[Expression],
-                ) -> Result<Scalar> {
+                ) -> KernelResult<Scalar> {
                     Ok(Scalar::Integer(0))
                 }
             }
@@ -1932,7 +1937,7 @@ mod tests {
                 DirectDataSkippingPredicateEvaluator, DirectPredicateEvaluator,
                 IndirectDataSkippingPredicateEvaluator,
             };
-            use crate::Result;
+            use crate::KernelResult;
 
             #[derive(Debug, PartialEq)]
             struct TestOpaquePredOp;
@@ -1947,7 +1952,7 @@ mod tests {
                     _eval_pred: &DirectPredicateEvaluator<'_>,
                     _exprs: &[Expression],
                     _inverted: bool,
-                ) -> Result<Option<bool>> {
+                ) -> KernelResult<Option<bool>> {
                     Ok(Some(true))
                 }
                 fn eval_as_data_skipping_predicate(
