@@ -1151,9 +1151,7 @@ pub(super) mod tests {
                 .with_max_catalog_version(1)
                 .build(engine.as_ref());
 
-            assert!(
-                matches!(result, Err(KernelError::Generic(ref message)) if message.contains("only commits"))
-            );
+            assert!(matches!(result, Err(KernelError::InvalidLogPath(_))));
 
             Ok(())
         }
