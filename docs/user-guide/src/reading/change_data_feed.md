@@ -13,13 +13,16 @@ Before reading this page, make sure you understand
 **Change Data Feed** (CDF) is a Delta feature that records row-level changes (inserts,
 updates, deletes) as part of each commit. The table must have the `delta.enableChangeDataFeed`
 table property set to `true` for every version in the range you want to read. If CDF is
-disabled for any version in the range, `TableChanges::try_new` returns an error.
+disabled at a range boundary, `TableChanges::try_new` returns an error. During log replay,
+consuming the scan iterator returns an error if CDF is disabled at an intermediate version.
 
 ## Creating a TableChanges
 
 `TableChanges::try_new` takes a table URL, an `Engine` reference, a start version, and an
-optional end version. It validates that CDF is enabled and that the schema is compatible
-across the requested range.
+optional end version. It checks CDF enablement, reader support, and schema equality at the
+range boundaries. Intermediate metadata and protocol updates are validated during log replay
+as you consume the iterator returned by `TableChangesScan::execute`. A statically false predicate
+returns an empty iterator without replaying or validating intermediate versions.
 
 ```rust,no_run
 # extern crate delta_kernel;

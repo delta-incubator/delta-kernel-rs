@@ -1,18 +1,23 @@
 use std::collections::HashMap;
+use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
 
 use itertools::Itertools;
 use rstest::rstest;
-use test_utils::LoggingTest;
+use serde_json::json;
+use test_utils::{add_commit, LoggingTest};
 
 use super::{
     table_changes_action_iter, table_changes_action_iter_with_mode, TableChangesScanMetadata,
 };
 use crate::actions::{Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
+use crate::engine::sync::json::SyncJsonHandler;
 use crate::engine::sync::SyncEngine;
+use crate::engine::test_delegating::DelegatingEngine;
 use crate::expressions::{col, lit, BinaryPredicateOp};
 use crate::log_segment::LogSegment;
+use crate::object_store::memory::InMemory;
 use crate::path::ParsedLogPath;
 use crate::scan::state::DvInfo;
 use crate::scan::PhysicalPredicate;
@@ -25,11 +30,12 @@ use crate::table_changes::CdfMode;
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::{ColumnMappingMode, TableFeature};
 use crate::table_properties::{
-    ENABLE_CHANGE_DATA_FEED, ENABLE_ROW_TRACKING, ROW_TRACKING_SUSPENDED,
+    ENABLE_CHANGE_DATA_FEED, ENABLE_IN_COMMIT_TIMESTAMPS, ENABLE_ROW_TRACKING,
+    ROW_TRACKING_SUSPENDED,
 };
 use crate::unit_test_utils::{
-    assert_result_error_with_message, Action, LocalMockTable, MockProtocolBuilder,
-    MockTableConfigurationBuilder,
+    assert_result_error_with_message, create_log_path, serialize_actions, Action, LocalMockTable,
+    MockProtocolBuilder, MockTableConfigurationBuilder,
 };
 use crate::{Engine, KernelError, KernelResult, Predicate, Version};
 
@@ -215,6 +221,200 @@ async fn metadata_protocol() {
     let sv = result_to_sv(scan_batches);
     assert_eq!(sv, &[false, false]);
 }
+
+#[rstest]
+#[tokio::test]
+async fn metadata_and_protocol_are_applied_atomically_across_action_order_and_batches(
+    #[values(false, true)] protocol_first: bool,
+    #[values(1, 1024)] batch_size: usize,
+) {
+    let engine = Arc::new(
+        DelegatingEngine::new(Arc::new(SyncEngine::new())).with_json_handler(Arc::new(
+            SyncJsonHandler::new(None).with_batch_size(NonZero::new(batch_size).unwrap()),
+        )),
+    );
+    let mut mock_table = LocalMockTable::new();
+    let end_schema = schema_ref! {
+        nullable "id": INTEGER,
+        nullable "value": STRING,
+        nullable "ts": TIMESTAMP_NTZ,
+    };
+    let mut actions = vec![
+        metadata_with_cdf(end_schema.clone()),
+        Action::Protocol(
+            Protocol::try_new_modern(
+                [TableFeature::TimestampWithoutTimezone],
+                [
+                    TableFeature::TimestampWithoutTimezone,
+                    TableFeature::ChangeDataFeed,
+                ],
+            )
+            .unwrap(),
+        ),
+    ];
+    if protocol_first {
+        actions.reverse();
+    }
+    mock_table.commit(actions).await;
+
+    let commit = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
+    let mut table_config = get_default_table_config(&table_root);
+    let scanner = LogReplayScanner::try_new(
+        engine.as_ref(),
+        &mut table_config,
+        commit,
+        &end_schema,
+        CdfMode::ChangeDataFeed,
+    )
+    .unwrap();
+    assert_eq!(table_config.logical_schema(), end_schema);
+    assert!(table_config.is_feature_supported(&TableFeature::TimestampWithoutTimezone));
+
+    let batches: Vec<_> = scanner
+        .into_scan_batches(engine, None)
+        .unwrap()
+        .try_collect()
+        .unwrap();
+    assert_eq!(batches.len(), if batch_size == 1 { 2 } else { 1 });
+    assert_eq!(
+        batches
+            .iter()
+            .map(|batch| batch.scan_metadata.len())
+            .sum::<usize>(),
+        2,
+    );
+    if batch_size == 1 {
+        assert!(batches.iter().all(|batch| batch.scan_metadata.len() == 1));
+    }
+}
+
+#[rstest]
+#[case::catalog_managed(TableFeature::CatalogManaged)]
+#[case::catalog_owned_preview(TableFeature::CatalogOwnedPreview)]
+#[tokio::test]
+async fn catalog_protocol_support_depends_on_the_change_feed_mode(
+    #[case] catalog_feature: TableFeature,
+    #[values(CdfMode::ChangeDataFeed, CdfMode::RowTracking)] mode: CdfMode,
+    #[values(false, true)] protocol_first: bool,
+    #[values(1, 1024)] batch_size: usize,
+) {
+    let engine = Arc::new(
+        DelegatingEngine::new(Arc::new(SyncEngine::new())).with_json_handler(Arc::new(
+            SyncJsonHandler::new(None).with_batch_size(NonZero::new(batch_size).unwrap()),
+        )),
+    );
+    let mut mock_table = LocalMockTable::new();
+    let metadata = row_tracking_metadata(get_schema())
+        .with_configuration_entry(ENABLE_CHANGE_DATA_FEED, "true")
+        .with_configuration_entry(ENABLE_IN_COMMIT_TIMESTAMPS, "true");
+    let mut updates = vec![
+        Action::Metadata(metadata),
+        Action::Protocol(
+            Protocol::try_new_modern(
+                [catalog_feature.clone()],
+                [
+                    catalog_feature,
+                    TableFeature::InCommitTimestamp,
+                    TableFeature::ChangeDataFeed,
+                    TableFeature::RowTracking,
+                    TableFeature::DomainMetadata,
+                ],
+            )
+            .unwrap(),
+        ),
+    ];
+    if protocol_first {
+        updates.reverse();
+    }
+    mock_table
+        .commit(
+            [Action::CommitInfo(CommitInfo::new(
+                1000,
+                Some(1000),
+                None,
+                None,
+                true,
+            ))]
+            .into_iter()
+            .chain(updates),
+        )
+        .await;
+    let commit = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
+    let mut table_config = get_default_table_config(&table_root);
+    let result = LogReplayScanner::try_new(
+        engine.as_ref(),
+        &mut table_config,
+        commit,
+        &get_schema(),
+        mode,
+    );
+    if mode == CdfMode::ChangeDataFeed {
+        assert!(matches!(
+            result,
+            Err(KernelError::ChangeDataFeedUnsupported(0))
+        ));
+    } else {
+        assert_eq!(result.unwrap().timestamp, 1000);
+        assert_eq!(table_config.logical_schema(), get_schema());
+        assert!(table_config.is_feature_enabled(&TableFeature::InCommitTimestamp));
+        assert!(table_config.is_feature_enabled(&TableFeature::RowTracking));
+    }
+}
+
+#[rstest]
+#[case::protocol(true, "min_reader_version must be >= 1, got 0")]
+#[case::metadata(false, "schemaString")]
+#[tokio::test]
+async fn malformed_duplicate_actions_in_later_batches_are_rejected(
+    #[case] malformed_protocol: bool,
+    #[case] expected_error: &str,
+) {
+    let store = Arc::new(InMemory::new());
+    let engine = Arc::new(
+        DelegatingEngine::new(Arc::new(SyncEngine::new_with_store(store.clone())))
+            .with_json_handler(Arc::new(
+                SyncJsonHandler::new(Some(store.clone())).with_batch_size(NonZero::new(1).unwrap()),
+            )),
+    );
+    let table_root = url::Url::parse("memory:///").unwrap();
+    let metadata = serde_json::to_value(metadata_with_cdf(get_schema())).unwrap();
+    let protocol = serde_json::to_value(protocol_action(1, 4, None, None)).unwrap();
+    let malformed = if malformed_protocol {
+        json!({"protocol": {"minReaderVersion": 0, "minWriterVersion": 4}})
+    } else {
+        let mut malformed = metadata.clone();
+        malformed["metaData"]
+            .as_object_mut()
+            .unwrap()
+            .remove("schemaString");
+        malformed
+    };
+    let data = serialize_actions([metadata, protocol, malformed]);
+    add_commit(&table_root, store.as_ref(), 0, data)
+        .await
+        .unwrap();
+    let commit = create_log_path("memory:///_delta_log/00000000000000000000.json");
+    let mut table_config = get_default_table_config(&table_root);
+    let result = LogReplayScanner::try_new(
+        engine.as_ref(),
+        &mut table_config,
+        commit,
+        &get_schema(),
+        CdfMode::ChangeDataFeed,
+    );
+    assert_result_error_with_message(result.map(|_| ()), expected_error);
+}
+
 #[tokio::test]
 async fn cdf_not_enabled() {
     let engine = Arc::new(SyncEngine::new());

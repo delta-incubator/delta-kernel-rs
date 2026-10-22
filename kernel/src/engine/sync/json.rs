@@ -1,9 +1,8 @@
 use std::io::{BufReader, Cursor};
+use std::num::NonZero;
 use std::sync::Arc;
 
 use bytes::Bytes;
-#[cfg(test)]
-use derive_more::Constructor;
 #[cfg(test)]
 use url::Url;
 
@@ -26,9 +25,27 @@ use crate::{
 use crate::{KernelResult, PredicateRef};
 
 #[cfg(test)]
-#[derive(Constructor)]
 pub(crate) struct SyncJsonHandler {
     store: Option<Arc<DynObjectStore>>,
+    batch_size: Option<NonZero<usize>>,
+}
+
+#[cfg(test)]
+impl SyncJsonHandler {
+    /// Create a JSON handler backed by `store`, or the local filesystem when absent.
+    pub(crate) fn new(store: Option<Arc<DynObjectStore>>) -> Self {
+        Self {
+            store,
+            batch_size: None,
+        }
+    }
+
+    /// Set the maximum number of rows per JSON file read batch.
+    #[cfg(test)]
+    pub(crate) fn with_batch_size(mut self, batch_size: NonZero<usize>) -> Self {
+        self.batch_size = Some(batch_size);
+        self
+    }
 }
 
 pub(super) fn try_create_from_json(
@@ -37,10 +54,22 @@ pub(super) fn try_create_from_json(
     _predicate: Option<PredicateRef>,
     file_location: String,
 ) -> KernelResult<impl Iterator<Item = KernelResult<ArrowEngineData>>> {
+    try_create_from_json_with_batch_size(data, schema, file_location, None)
+}
+
+fn try_create_from_json_with_batch_size(
+    data: Bytes,
+    schema: SchemaRef,
+    file_location: String,
+    batch_size: Option<NonZero<usize>>,
+) -> KernelResult<impl Iterator<Item = KernelResult<ArrowEngineData>>> {
     let json_schema = Arc::new(json_arrow_schema(&schema)?);
     let reorder_indices = build_json_reorder_indices(&schema)?;
-    let json = ReaderBuilder::new(json_schema)
-        .with_coerce_primitive(true)
+    let mut reader_builder = ReaderBuilder::new(json_schema).with_coerce_primitive(true);
+    if let Some(batch_size) = batch_size {
+        reader_builder = reader_builder.with_batch_size(batch_size.get());
+    }
+    let json = reader_builder
         .build(BufReader::new(Cursor::new(data)))?
         .map(move |data| fixup_json_read(data?, &reorder_indices, &file_location));
     Ok(json)
@@ -54,13 +83,12 @@ impl JsonHandler for SyncJsonHandler {
         schema: SchemaRef,
         predicate: Option<PredicateRef>,
     ) -> KernelResult<FileDataReadResultIterator> {
-        let iter = read_files_arrow(
-            self.store.as_ref(),
-            files,
-            schema,
-            predicate,
-            try_create_from_json,
-        );
+        let iter = read_files_arrow(self.store.as_ref(), files, schema, predicate, {
+            let batch_size = self.batch_size;
+            move |data, schema, _predicate, file_location| {
+                try_create_from_json_with_batch_size(data, schema, file_location, batch_size)
+            }
+        });
         Ok(Box::new(iter.map(|data| Ok(Box::new(data?) as _))))
     }
 

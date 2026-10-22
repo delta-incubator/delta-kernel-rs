@@ -181,6 +181,11 @@ impl CommitRange {
             latest_metadata,
         })
     }
+
+    /// Commit-file pointers in the ordering selected by the range builder.
+    pub(crate) fn commit_files(&self) -> &[ParsedLogPath] {
+        &self.commit_files
+    }
 }
 
 /// Iterator yielded by [`CommitRange::commits`]. Holds the iterator's accumulated

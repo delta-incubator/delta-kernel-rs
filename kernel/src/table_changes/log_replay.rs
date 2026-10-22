@@ -22,7 +22,7 @@ use crate::schema::{schema_ref, ColumnNamesAndTypes, DataType, SchemaRef};
 use crate::table_changes::scan_file::{cdf_scan_row_expression, cdf_scan_row_schema};
 use crate::table_changes::CdfMode;
 use crate::table_configuration::TableConfiguration;
-use crate::table_features::{format_features, Operation, TableFeature};
+use crate::table_features::{format_features, TableFeature};
 use crate::utils::require;
 use crate::{Engine, EngineData, KernelError, KernelResult, PredicateRef, RowVisitor};
 
@@ -126,7 +126,8 @@ pub(crate) fn table_changes_action_iter_with_mode(
 ///       exists in another `add` action _within the same commit_. We store the result in
 ///       `remove_dvs`. Deletion vector resolution affects whether a remove action is selected in
 ///       the second phase, so we must perform it ahead of time in phase 1.
-///     - Ensure that reading is supported on any protocol updates.
+///     - Apply metadata and protocol updates together after reading the entire commit, then
+///       validate support for the mode's read operation.
 ///     - Ensure that the mode's required table feature remains enabled on metadata updates.
 ///     - Ensure that schema updates satisfy the mode's compatibility policy. Change Data Feed mode
 ///       requires equality; row-tracking mode allows additive nullable columns and relaxed
@@ -173,7 +174,8 @@ impl LogReplayScanner {
     /// 1. Check the commits for the presence of a `cdc` action.
     /// 2. Construct a map from path to deletion vector of remove actions that share the same path
     ///    as an add action.
-    /// 3. Perform validation on each protocol and metadata action in the commit.
+    /// 3. Apply metadata and protocol updates together after reading every batch, then validate
+    ///    support for the mode's read operation.
     ///
     /// For more details, see the documentation for [`LogReplayScanner`].
     fn try_new(
@@ -213,6 +215,8 @@ impl LogReplayScanner {
         let mut remove_dvs = HashMap::default();
         let mut add_paths = HashSet::default();
         let mut has_cdc_action = false;
+        let mut metadata_opt = None;
+        let mut protocol_opt = None;
 
         for actions in action_iter {
             let actions = actions?;
@@ -225,51 +229,49 @@ impl LogReplayScanner {
             };
             visitor.visit_rows_of(actions.as_ref())?;
 
-            let metadata_opt = Metadata::try_new_from_data(actions.as_ref())?;
-            let has_metadata_update = metadata_opt.is_some();
-            let protocol_opt = Protocol::try_new_from_data(actions.as_ref())?;
-            let has_protocol_update = protocol_opt.is_some();
+            metadata_opt = metadata_opt.or(Metadata::try_new_from_data(actions.as_ref())?);
+            protocol_opt = protocol_opt.or(Protocol::try_new_from_data(actions.as_ref())?);
+        }
 
-            if let Some(ref metadata) = metadata_opt {
-                let schema = metadata.parse_schema()?;
-                // Compatibility is evaluated against the end version's logical schema.
-                require!(
-                    mode.schemas_compatible(&schema, table_schema.as_ref()),
-                    KernelError::change_data_feed_incompatible_schema_at_version(
-                        table_schema,
-                        &schema,
-                        commit_file.version
-                    )
-                );
-            }
+        let has_metadata_update = metadata_opt.is_some();
+        let has_protocol_update = protocol_opt.is_some();
+        if let Some(ref metadata) = metadata_opt {
+            let schema = metadata.parse_schema()?;
+            // Compatibility is evaluated against the end version's logical schema.
+            require!(
+                mode.schemas_compatible(&schema, table_schema.as_ref()),
+                KernelError::change_data_feed_incompatible_schema_at_version(
+                    table_schema,
+                    &schema,
+                    commit_file.version
+                )
+            );
+        }
+        if has_metadata_update || has_protocol_update {
+            *table_configuration = TableConfiguration::try_new_from(
+                table_configuration,
+                metadata_opt,
+                protocol_opt,
+                commit_file.version,
+            )?;
 
-            // Update table configuration with any new Protocol or Metadata from this commit
-            if has_metadata_update || has_protocol_update {
-                *table_configuration = TableConfiguration::try_new_from(
-                    table_configuration,
-                    metadata_opt,
-                    protocol_opt,
-                    commit_file.version,
-                )?;
+            let writer_features_str = table_configuration
+                .protocol()
+                .writer_features()
+                .map(format_features)
+                .unwrap_or_else(|| "[]".to_string());
 
-                let writer_features_str = table_configuration
-                    .protocol()
-                    .writer_features()
-                    .map(format_features)
-                    .unwrap_or_else(|| "[]".to_string());
-
-                info!(
-                    version = commit_file.version,
-                    id = table_configuration.metadata().id(),
-                    // Writer features are always a superset of reader features, so we log writer features to trace the full set of table features.
-                    writerFeatures = %writer_features_str,
-                    minReaderVersion = table_configuration.protocol().min_reader_version(),
-                    minWriterVersion = table_configuration.protocol().min_writer_version(),
-                    schemaString = %table_configuration.metadata().schema_string(),
-                    configuration = ?table_configuration.metadata().configuration(),
-                    "Table configuration updated during CDF query"
-                );
-            }
+            info!(
+                version = commit_file.version,
+                id = table_configuration.metadata().id(),
+                // Writer features are always a superset of reader features, so we log writer features to trace the full set of table features.
+                writerFeatures = %writer_features_str,
+                minReaderVersion = table_configuration.protocol().min_reader_version(),
+                minWriterVersion = table_configuration.protocol().min_writer_version(),
+                schemaString = %table_configuration.metadata().schema_string(),
+                configuration = ?table_configuration.metadata().configuration(),
+                "Table configuration updated during CDF query"
+            );
 
             if has_metadata_update {
                 require!(
@@ -278,11 +280,9 @@ impl LogReplayScanner {
                 );
             }
 
-            if has_protocol_update {
-                table_configuration
-                    .ensure_operation_supported(Operation::Cdf)
-                    .map_err(|e| mode.protocol_support_error(e, commit_file.version))?;
-            }
+            table_configuration
+                .ensure_operation_supported(mode.read_operation())
+                .map_err(|e| mode.read_support_error(e, commit_file.version))?;
         }
         // We resolve the remove deletion vector map after visiting the entire commit.
         if has_cdc_action {
