@@ -14,16 +14,11 @@ use crate::action_reconciliation::{
     ActionReconciliationIteratorState, DEFAULT_RETENTION_SECS,
 };
 use crate::actions::{Add, Metadata, Protocol, Remove};
-use crate::arrow::array::{
-    create_array, Array, AsArray, Int64Array, MapArray, RecordBatch, StructArray,
-};
-use crate::arrow::datatypes::{DataType, Field, Schema};
-use crate::checkpoint::{
-    create_last_checkpoint_data, CheckpointWriter, LastCheckpointHintStats,
-    CHECKPOINT_ACTIONS_SCHEMA_V2,
-};
+use crate::arrow::array::{Array, AsArray, Int64Array, MapArray, StructArray};
+use crate::arrow::datatypes::{DataType, Schema};
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::checkpoint::{CheckpointSpec, V2CheckpointConfig};
+use crate::checkpoint::{CheckpointWriter, LastCheckpointHintStats, CHECKPOINT_ACTIONS_SCHEMA_V2};
 use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use crate::engine::sync::SyncEngine;
@@ -163,52 +158,6 @@ async fn test_create_checkpoint_metadata_batch() -> KernelResult<()> {
     assert_eq!(checkpoint_batch.actions_count, 1);
     assert_eq!(checkpoint_batch.add_actions_count, 0);
 
-    Ok(())
-}
-
-#[test]
-fn test_create_last_checkpoint_data() -> KernelResult<()> {
-    let version = 10;
-    let total_actions_counter = 100;
-    let add_actions_counter = 75;
-    let size_in_bytes: i64 = 1024 * 1024; // 1MB
-    let (store, _) = new_in_memory_store();
-    let engine = SyncEngine::new_with_store(store.clone());
-
-    // Create last checkpoint metadata
-    let last_checkpoint_batch = create_last_checkpoint_data(
-        &engine,
-        version,
-        total_actions_counter,
-        add_actions_counter,
-        size_in_bytes,
-    )?;
-
-    // Verify the underlying EngineData contains the expected `LastCheckpointInfo` schema and data
-    let arrow_engine_data = ArrowEngineData::try_from_engine_data(last_checkpoint_batch)?;
-    let record_batch = arrow_engine_data.record_batch();
-
-    // Build the expected RecordBatch
-    let expected_schema = Arc::new(Schema::new(vec![
-        Field::new("version", DataType::Int64, false),
-        Field::new("size", DataType::Int64, false),
-        Field::new("parts", DataType::Int64, true),
-        Field::new("sizeInBytes", DataType::Int64, true),
-        Field::new("numOfAddFiles", DataType::Int64, true),
-    ]));
-    let expected = RecordBatch::try_new(
-        expected_schema,
-        vec![
-            create_array!(Int64, [version]),
-            create_array!(Int64, [total_actions_counter]),
-            create_array!(Int64, [None]),
-            create_array!(Int64, [size_in_bytes]),
-            create_array!(Int64, [add_actions_counter]),
-        ],
-    )
-    .unwrap();
-
-    assert_eq!(*record_batch, expected);
     Ok(())
 }
 

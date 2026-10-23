@@ -45,9 +45,10 @@ This method handles everything in one call: reads the log, reconciles actions, w
 checkpoint Parquet file, and updates the `_last_checkpoint` hint file.
 
 > [!NOTE]
-> `checkpoint()` calls `ParquetHandler::write_parquet_file` to write the checkpoint and
-> `StorageHandler::head` to retrieve its metadata. The `DefaultEngine` implements both.
-> If you use a custom engine, make sure it provides working implementations of both.
+> `checkpoint()` calls `ParquetHandler::write_parquet_file` to write the checkpoint,
+> `StorageHandler::head` to retrieve its metadata, and `StorageHandler::put` to write the
+> `_last_checkpoint` file. The `DefaultEngine` implements these methods. If you use a custom
+> engine, make sure it provides working implementations of them.
 
 ## After a commit
 
