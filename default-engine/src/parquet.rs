@@ -976,6 +976,11 @@ mod tests {
                     .as_any()
                     .downcast_ref::<TimestampMicrosecondArray>()
                     .expect("reader output must use microseconds");
+                assert_eq!(
+                    col.null_count(),
+                    0,
+                    "column {col_idx} must preserve non-null inputs",
+                );
                 actual.extend_from_slice(col.values());
             }
             assert_eq!(actual, expected_us, "column {col_idx}");

@@ -567,20 +567,15 @@ fn timestamp_footer_stats_match_engine_casts(
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
     let predicate = column_pred!("ts");
     let filter = RowGroupFilter::new(builder.metadata().row_group(0), &predicate);
-    let data_type = if timezone.is_some() {
-        DataType::TIMESTAMP
+    let (data_type, scalar) = if timezone.is_some() {
+        (DataType::TIMESTAMP, Scalar::Timestamp as fn(i64) -> Scalar)
     } else {
-        DataType::TIMESTAMP_NTZ
+        (
+            DataType::TIMESTAMP_NTZ,
+            Scalar::TimestampNtz as fn(i64) -> Scalar,
+        )
     };
-    let expected_scalar = expected.map(|stat| {
-        stat.map(|value| {
-            if timezone.is_some() {
-                Scalar::Timestamp(value)
-            } else {
-                Scalar::TimestampNtz(value)
-            }
-        })
-    });
+    let expected_scalar = expected.map(|stat| stat.map(scalar));
     assert_eq!(
         filter.get_min_stat(&column_name!("ts"), &data_type),
         expected_scalar[0]
@@ -591,11 +586,7 @@ fn timestamp_footer_stats_match_engine_casts(
     );
 
     if expected.contains(&None) {
-        let bound = if timezone.is_some() {
-            Scalar::Timestamp(0)
-        } else {
-            Scalar::TimestampNtz(0)
-        };
+        let bound = scalar(0);
         let comparisons: [fn(Expression, Expression) -> Predicate; 3] =
             [Predicate::lt, Predicate::gt, Predicate::eq];
         for comparison in comparisons {
