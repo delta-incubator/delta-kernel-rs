@@ -1287,7 +1287,7 @@ async fn partitioned_snapshot(
 }
 
 #[tokio::test]
-async fn incremental_scan_does_not_support_requsted_parsed_partition_values(
+async fn incremental_scan_rejects_requested_parsed_partition_values(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, target) = partitioned_snapshot(Partitioning::Timestamp).await?;
     let result = target
@@ -1641,7 +1641,7 @@ async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
         .build(engine.as_ref())?;
 
     // === When full and incremental scans use the same predicate and timezone ===
-    let full_scan_surviving_paths = full_scan_surviving_paths(
+    let target_file_list = full_scan_surviving_paths(
         freshly_built_target,
         engine.as_ref(),
         predicate.clone(),
@@ -1676,7 +1676,7 @@ async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
     );
     let expected: HashSet<_> = expected_paths.iter().map(|path| path.to_string()).collect();
     assert_eq!(base_file_list, expected);
-    assert_eq!(base_file_list, full_scan_surviving_paths);
+    assert_eq!(base_file_list, target_file_list);
     Ok(())
 }
 

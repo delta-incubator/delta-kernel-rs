@@ -1297,9 +1297,8 @@ mod tests {
     use url::Url;
 
     use super::{
-        get_add_transform_expr, map_to_struct_options, scan_action_iter, InternalScanState,
-        ScanLogReplayProcessor, ScanPartitionValuesOptions, ScanStatsOptions,
-        SerializableScanState,
+        get_add_transform_expr, scan_action_iter, InternalScanState, ScanLogReplayProcessor,
+        ScanPartitionValuesOptions, ScanStatsOptions, SerializableScanState,
     };
     use crate::arrow::array::cast::AsArray;
     use crate::arrow::array::types::TimestampMicrosecondType;
@@ -1356,23 +1355,6 @@ mod tests {
                 self.inner.evaluate(batch)
             }
         }
-    }
-
-    #[rstest]
-    fn map_to_struct_options_preserves_timezone(
-        #[values(
-            None,
-            Some("UTC"),
-            Some("America/Los_Angeles"),
-            Some("+05:30"),
-            Some("Not/AZone")
-        )]
-        timezone: Option<&str>,
-    ) {
-        assert_eq!(
-            map_to_struct_options(timezone).timestamp_timezone(),
-            timezone
-        );
     }
 
     #[test]

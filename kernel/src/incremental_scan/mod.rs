@@ -69,8 +69,8 @@ impl IncrementalScanBuilder {
     ///
     /// Defaults to [`PartitionValuesOptions::default`].
     ///
-    /// TODO(#3702): Kernel does not yet support [`PartitionValuesOptions::with_struct`] in
-    /// incremental scans. Passing it causes [`Self::build`] to return an error. Support that.
+    /// Kernel does not yet support [`PartitionValuesOptions::with_struct`] in incremental scans.
+    /// Passing it causes [`Self::build`] to return an error.
     pub fn with_partition_values(
         mut self,
         partition_values_options: PartitionValuesOptions,
@@ -217,6 +217,10 @@ impl IncrementalScanBuilder {
                 // parse stats from `add.stats` JSON and partition values from
                 // `add.partitionValues`, then skip against the shared `DataSkippingFilter`.
                 // `None` (predicate ineligible for skipping) degrades to keep-all.
+                //
+                // Pass the timezone to MapToStruct unconditionally to avoid type-specific branches.
+                // Invalid timezones therefore fail data skipping when a partition expression is
+                // evaluated, even for predicates on non-TIMESTAMP partition columns.
                 let filter = DataSkippingFilter::for_raw_action_batch(
                     engine,
                     physical_predicate,

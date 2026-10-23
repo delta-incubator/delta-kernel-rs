@@ -359,7 +359,9 @@ impl PartitionValuesOptions {
     }
 
     /// When this is called, the read output gains a `partitionValues_parsed` struct column with one
-    /// typed nullable field per partition column (physical names, table partition-column order).
+    /// typed nullable field per partition column, using physical names. Fields follow table schema
+    /// order restricted to partition columns, which can differ from the order in metadata's
+    /// `partitionColumns`.
     /// On non-partitioned tables the column is omitted. Values come directly from the checkpoint's
     /// native `partitionValues_parsed` column when present and compatible, otherwise from parsing
     /// the string map.
@@ -388,9 +390,9 @@ impl PartitionValuesOptions {
     /// timezone, but does not record that timezone. As a result, the timezone can only be supplied
     /// by the connector, and Kernel cannot verify that it matches the writer's timezone.
     ///
-    /// Kernel does not yet support setting a timezone for row transforms on tables with `TIMESTAMP`
-    /// partition columns, so this option omits them as if [`ScanBuilder::without_row_transforms`]
-    /// were set on those tables.
+    /// For full scans, Kernel does not yet support setting a timezone for row transforms on tables
+    /// with `TIMESTAMP` partition columns, so this option omits them as if
+    /// [`ScanBuilder::without_row_transforms`] were set on those tables.
     ///
     /// Without this option, Kernel interprets offset-less timestamps as UTC. Invalid timezones
     /// cause errors only when Kernel evaluates an expression with the timezone, not when this
@@ -549,8 +551,11 @@ impl ScanBuilder {
     /// Defaults to [`PartitionValuesOptions::default`] (string map only). Engines that
     /// consume `partitionValues_parsed` directly should pass
     /// [`PartitionValuesOptions::with_struct`] to also emit the typed struct column.
-    pub fn with_partition_values(mut self, partition_values: PartitionValuesOptions) -> Self {
-        self.partition_values = partition_values;
+    pub fn with_partition_values(
+        mut self,
+        partition_values_options: PartitionValuesOptions,
+    ) -> Self {
+        self.partition_values = partition_values_options;
         self
     }
 

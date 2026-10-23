@@ -74,6 +74,23 @@ fn assert_stats_schemas_aligned(logical: &StructType, physical: &StructType) {
     }
 }
 
+#[rstest]
+fn map_to_struct_options_preserves_timezone(
+    #[values(
+        None,
+        Some("UTC"),
+        Some("America/Los_Angeles"),
+        Some("+05:30"),
+        Some("Not/AZone")
+    )]
+    timezone: Option<&str>,
+) {
+    assert_eq!(
+        map_to_struct_options(timezone).timestamp_timezone(),
+        timezone
+    );
+}
+
 #[test]
 fn test_static_skipping() {
     let test_cases = [
