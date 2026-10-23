@@ -416,7 +416,7 @@ impl LogSegment {
         {
             return Ok(newest);
         }
-        match self.unread_manifest_commit(&newest) {
+        match self.manifest_commit_to_read(&newest) {
             Some((manifest_commit, pointer)) => {
                 self.replay_for_pm_from_manifest_commit(executor, newest, manifest_commit, pointer)
             }
@@ -428,10 +428,11 @@ impl LogSegment {
         }
     }
 
-    /// The listed manifest commit, with its pointer, whose checkpoint action the `newest` commit
-    /// points at but does not carry.
+    /// The listed manifest commit, with its pointer, whose checkpoint action replay must still
+    /// read: the commit the `newest` commit's `lastManifestCommit` names when the newest commit
+    /// does not carry the action itself.
     #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-    fn unread_manifest_commit(
+    fn manifest_commit_to_read(
         &self,
         newest: &PmCandidate,
     ) -> Option<(&ParsedLogPath, LastManifestCommit)> {
@@ -671,7 +672,7 @@ impl PmCandidate {
             .map_or(Ok(()), |pointer| pointer.ensure_at_or_before(version))
     }
 
-    /// Combines two replay results, keeping each field's higher-versioned value and the first
+    /// Combines two replay results, keeping each field's higher-versioned value and either side's
     /// `lastManifestCommit`.
     #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
     fn merge(self, other: PmCandidate) -> Self {
@@ -679,6 +680,7 @@ impl PmCandidate {
             protocol: newer(self.protocol, other.protocol),
             metadata: newer(self.metadata, other.metadata),
             checkpoint: newer(self.checkpoint, other.checkpoint),
+            // Only the newest commit's batch yields a pointer, so both sides hold the same one.
             last_manifest_commit: self.last_manifest_commit.or(other.last_manifest_commit),
         }
     }

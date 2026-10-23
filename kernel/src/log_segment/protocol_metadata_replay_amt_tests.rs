@@ -508,9 +508,16 @@ async fn plan_replay_without_pointer_skips_older_checkpoint_action() {
 // the action, as does a newest commit whose own action the pointer does not name.
 #[cfg(feature = "declarative-plans")]
 #[rstest]
-#[case::pointed_commit_has_no_checkpoint_action(
+#[case::pointed_commit_without_action_and_metadata(
     vec![
         protocol_commit(1, 2),
+        commit_info(Some((0, 0))),
+    ],
+    "that commit carries no checkpoint action"
+)]
+#[case::pointed_commit_without_action_and_protocol(
+    vec![
+        metadata_commit(one_column_schema()),
         commit_info(Some((0, 0))),
     ],
     "that commit carries no checkpoint action"
