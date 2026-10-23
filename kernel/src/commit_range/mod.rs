@@ -89,7 +89,8 @@ pub struct CommitRange {
     start_version: Version,
     end_version: Version,
     commit_ordering: CommitOrdering,
-    commit_range_validation: bool,
+    supports_commit_actions: bool,
+    supports_commit_files: bool,
     fail_on_data_loss: bool,
 }
 
@@ -137,9 +138,9 @@ impl CommitRange {
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
     pub(crate) fn commit_files(&self) -> KernelResult<impl KernelResultIterator<ParsedLogPath>> {
         require!(
-            self.commit_ordering == CommitOrdering::AscendingOrder,
+            self.supports_commit_files,
             KernelError::CommitRange(
-                "Commit file iteration requires ascending commit ordering".to_string()
+                "Commit file iteration is not supported for this range".to_string()
             )
         );
         Ok(CommitFileIterator {
@@ -182,10 +183,9 @@ impl CommitRange {
         actions: &[DeltaAction],
     ) -> KernelResult<impl KernelResultIterator<CommitAction>> {
         require!(
-            self.commit_range_validation,
+            self.supports_commit_actions,
             KernelError::CommitRange(
-                "Commit action iteration requires commit range validation to be enabled"
-                    .to_string()
+                "Commit action iteration is not supported for this range".to_string()
             )
         );
         if actions.is_empty() {
@@ -1290,38 +1290,68 @@ mod tests {
         assert!(msg.contains("in-commit timestamp"), "got: {msg}");
     }
 
+    #[rstest::rstest]
+    #[case::validated_ascending_supports_both(true, CommitOrdering::AscendingOrder, None, None)]
+    #[case::validated_descending_rejects_commit_files(
+        true,
+        CommitOrdering::DescendingOrder,
+        None,
+        Some("Commit file iteration is not supported for this range")
+    )]
+    #[case::relaxed_ascending_rejects_commits_even_when_contiguous(
+        false,
+        CommitOrdering::AscendingOrder,
+        Some("Commit action iteration is not supported for this range"),
+        None
+    )]
     #[tokio::test]
-    async fn test_commit_files_errors_on_descending_ordering() {
+    async fn test_iterator_support_follows_validation_and_ordering(
+        #[case] commit_range_validation: bool,
+        #[case] ordering: CommitOrdering,
+        #[case] expected_commits_err: Option<&str>,
+        #[case] expected_commit_files_err: Option<&str>,
+    ) {
         let (engine, table_root) =
             engine_with_commits(&[(0, VALID_PROTOCOL_LINE), (1, VALID_PROTOCOL_LINE)]).await;
         let range = CommitRange::builder_for(table_root, 0)
-            .with_ordering(CommitOrdering::DescendingOrder)
+            .with_ordering(ordering)
+            .with_commit_range_validation(commit_range_validation)
             .build(engine.as_ref())
             .unwrap();
+        let ordered_versions: &[Version] = match ordering {
+            CommitOrdering::AscendingOrder => &[0, 1],
+            CommitOrdering::DescendingOrder => &[1, 0],
+        };
 
-        let result = range.commit_files();
-        assert!(
-            matches!(result, Err(KernelError::CommitRange(_))),
-            "expected CommitRange error"
-        );
-        assert_result_error_with_message(result, "requires ascending commit ordering");
-    }
+        let commits = range.commits(engine, None, &[DeltaAction::Protocol]);
+        match expected_commits_err {
+            Some(msg) => {
+                assert!(matches!(commits, Err(KernelError::CommitRange(_))));
+                assert_result_error_with_message(commits, msg);
+            }
+            None => {
+                let versions: Vec<_> = commits
+                    .unwrap()
+                    .map(|commit| commit.unwrap().version())
+                    .collect();
+                assert_eq!(versions, ordered_versions);
+            }
+        }
 
-    #[tokio::test]
-    async fn test_commits_errors_when_commit_range_validation_disabled() {
-        let (engine, table_root) =
-            engine_with_commits(&[(0, VALID_PROTOCOL_LINE), (1, VALID_PROTOCOL_LINE)]).await;
-        let range = CommitRange::builder_for(table_root, 0)
-            .with_commit_range_validation(false)
-            .build(engine.as_ref())
-            .unwrap();
-
-        let result = range.commits(engine, None, &[DeltaAction::Add]);
-        assert!(
-            matches!(result, Err(KernelError::CommitRange(_))),
-            "expected CommitRange error"
-        );
-        assert_result_error_with_message(result, "requires commit range validation to be enabled");
+        let commit_files = range.commit_files();
+        match expected_commit_files_err {
+            Some(msg) => {
+                assert!(matches!(commit_files, Err(KernelError::CommitRange(_))));
+                assert_result_error_with_message(commit_files, msg);
+            }
+            None => {
+                let versions: Vec<_> = commit_files
+                    .unwrap()
+                    .map(|file| file.unwrap().version)
+                    .collect();
+                assert_eq!(versions, [0, 1]);
+            }
+        }
     }
 
     #[rstest::rstest]

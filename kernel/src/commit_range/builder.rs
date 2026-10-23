@@ -19,8 +19,10 @@ use crate::{Engine, KernelError, KernelResult, LogPath, Version};
 /// [`CommitRange::builder_from`] (snapshot-based). Supports configuring an end version
 /// and the commit ordering. Catalog-managed tables also supply the catalog-ratified log tail and
 /// maximum catalog version. [`Self::build`] lists the log for a path-based builder or reuses the
-/// commit-file metadata in a snapshot-based builder, then validates contiguity unless a
-/// path-based builder disabled it with `with_commit_range_validation`.
+/// commit-file metadata in a snapshot-based builder, then checks that the range is complete unless
+/// a path-based builder disabled validation with `with_commit_range_validation`. Disabling
+/// validation is only for ascending raw commit-file iteration with `CommitRange::commit_files`;
+/// [`CommitRange::commits`] is unavailable on such ranges.
 pub struct CommitRangeBuilder {
     table_root: String,
     start_version: Version,
@@ -97,10 +99,7 @@ impl CommitRangeBuilder {
     /// listed commits to be contiguous. When `false`, [`Self::build`] materializes whatever
     /// commits are listed in the range without validating the start version, contiguity, or
     /// end version. Disabling validation is only supported for path-based builders
-    /// ([`CommitRange::builder_for`]).
-    ///
-    /// Ranges built without validation support raw [`CommitRange::commit_files`] enumeration,
-    /// while [`CommitRange::commits`] is unavailable.
+    /// ([`CommitRange::builder_for`]) with ascending ordering.
     #[internal_api]
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
     pub(crate) fn with_commit_range_validation(mut self, commit_range_validation: bool) -> Self {
@@ -182,7 +181,8 @@ impl CommitRangeBuilder {
             start_version,
             end_version,
             commit_ordering,
-            commit_range_validation,
+            supports_commit_actions: commit_range_validation,
+            supports_commit_files: commit_ordering == CommitOrdering::AscendingOrder,
             fail_on_data_loss,
         })
     }
