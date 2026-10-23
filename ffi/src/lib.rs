@@ -51,6 +51,8 @@ use handle::Handle;
 extern crate self as delta_kernel_ffi;
 
 mod alloc_stats;
+#[cfg(feature = "context-alloc-tracking")]
+pub mod allocation_context;
 
 pub mod column_default;
 pub mod commit_range;

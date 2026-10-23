@@ -1,0 +1,22 @@
+[package]
+name = "delta_kernel_memory_tracking"
+description = "Experimental context attribution for native allocation diagnostics"
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[package.metadata.release]
+release = false
+
+[dependencies]
+
+[dev-dependencies]
+peak_alloc = "0.3.0"
+
+[[bench]]
+name = "allocation_tracking"
+harness = false
