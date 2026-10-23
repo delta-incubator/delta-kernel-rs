@@ -667,14 +667,12 @@ async fn plan_replay_bounded_by_crc_or_checkpoint_runs_one_plan(
         .unwrap();
     assert!(resolution.protocol.is_some() && resolution.metadata.is_some());
     assert!(resolution.captured_checkpoint_action.is_none());
-    let expected = newest_has_commit_info.then(|| LastManifestCommit::new(0, 0).unwrap());
-    match (resolution.last_manifest_commit, expected) {
-        (LastManifestCommitResolution::Resolved(Some(resolved)), Some(expected)) => {
-            assert_eq!(resolved, expected)
-        }
-        (LastManifestCommitResolution::Unresolved, None) => {}
-        (resolution, expected) => panic!("expected pointer {expected:?}, got {resolution:?}"),
-    }
+    let expected = if newest_has_commit_info {
+        LastManifestCommitResolution::Resolved(Some(LastManifestCommit::new(0, 0).unwrap()))
+    } else {
+        LastManifestCommitResolution::Unresolved
+    };
+    assert_eq!(resolution.last_manifest_commit, expected);
     assert_eq!(plans.load(Ordering::Relaxed), 1);
 }
 
@@ -788,11 +786,10 @@ async fn check_pointed_action_above_segment_checkpoint<E: Engine>(
         .captured_checkpoint_action
         .map(|action| action.version);
     assert_eq!(version, expected_captured_version);
-    assert!(matches!(
+    assert_eq!(
         resolution.last_manifest_commit,
-        LastManifestCommitResolution::Resolved(Some(pointer))
-            if pointer == LastManifestCommit::new(2, 1).unwrap()
-    ));
+        LastManifestCommitResolution::Resolved(Some(LastManifestCommit::new(2, 1).unwrap()))
+    );
 }
 
 // A plan executor that counts the operations it runs.
@@ -814,7 +811,7 @@ impl PlanExecutor for CountingPlanExecutor {
 // Replay still resolves P&M from the checkpoint and the newest commit's pointer, but following the
 // pointer to the action fails because the segment does not list its commit.
 #[tokio::test]
-async fn standalone_checkpoint_above_pointed_commit_locates_unlisted_action() {
+async fn standalone_checkpoint_above_pointed_commit_fails_to_read_its_action() {
     check_standalone_checkpoint_above_pointed_commit(non_plan_engine).await;
     #[cfg(feature = "declarative-plans")]
     check_standalone_checkpoint_above_pointed_commit(|store| SyncEngine::new_with_store(store))
@@ -840,11 +837,10 @@ async fn check_standalone_checkpoint_above_pointed_commit<E: Engine>(
         .unwrap();
     assert!(resolution.protocol.is_some() && resolution.metadata.is_some());
     assert!(resolution.captured_checkpoint_action.is_none());
-    assert!(matches!(
+    assert_eq!(
         resolution.last_manifest_commit,
-        LastManifestCommitResolution::Resolved(Some(pointer))
-            if pointer == LastManifestCommit::new(0, 0).unwrap()
-    ));
+        LastManifestCommitResolution::Resolved(Some(LastManifestCommit::new(0, 0).unwrap()))
+    );
 
     let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
     assert_result_error_with_message(
@@ -1207,7 +1203,12 @@ async fn replay_resolves_last_manifest_commit_from_newest_commit(
     #[case] later_commits: Vec<String>,
     #[case] expected: Option<(i64, i64)>,
 ) {
-    let expected = expected.map(|(v, c)| LastManifestCommit::new(v, c).unwrap());
+    let expected = match expected {
+        Some((v, c)) => {
+            LastManifestCommitResolution::Resolved(Some(LastManifestCommit::new(v, c).unwrap()))
+        }
+        None => LastManifestCommitResolution::Unresolved,
+    };
     assert_replay_last_manifest_commit(&later_commits, &expected, non_plan_engine).await;
     #[cfg(feature = "declarative-plans")]
     assert_replay_last_manifest_commit(&later_commits, &expected, |store| {
@@ -1218,7 +1219,7 @@ async fn replay_resolves_last_manifest_commit_from_newest_commit(
 
 async fn assert_replay_last_manifest_commit<E: Engine>(
     later_commits: &[String],
-    expected: &Option<LastManifestCommit>,
+    expected: &LastManifestCommitResolution,
     make_engine: impl FnOnce(Arc<InMemory>) -> E,
 ) {
     let (store, table_root) = manifest_commit_table(later_commits).await;
@@ -1232,13 +1233,7 @@ async fn assert_replay_last_manifest_commit<E: Engine>(
     let resolution = log_segment
         .read_protocol_metadata_opt(&engine, None)
         .unwrap();
-    match (resolution.last_manifest_commit, expected) {
-        (LastManifestCommitResolution::Resolved(Some(resolved)), Some(expected)) => {
-            assert_eq!(&resolved, expected)
-        }
-        (LastManifestCommitResolution::Unresolved, None) => {}
-        (resolution, expected) => panic!("expected {expected:?}, got {resolution:?}"),
-    }
+    assert_eq!(&resolution.last_manifest_commit, expected);
 }
 
 // A `lastManifestCommit` naming a version after the commit that carries it is invalid, so replay
@@ -1332,10 +1327,12 @@ async fn plan_replay_reads_commits_a_compaction_covers(
         .captured_checkpoint_action
         .map(|action| action.version);
     assert_eq!(version, Some(1));
-    assert!(matches!(
+    assert_eq!(
         resolution.last_manifest_commit,
-        LastManifestCommitResolution::Resolved(Some(pointer)) if pointer.version == pointer_version
-    ));
+        LastManifestCommitResolution::Resolved(Some(
+            LastManifestCommit::new(pointer_version, 1).unwrap()
+        ))
+    );
 }
 
 // A replayed snapshot serves `lastManifestCommit` from build-time state: it still resolves after
@@ -1354,29 +1351,6 @@ async fn replayed_snapshot_serves_last_manifest_commit_without_reading_the_log()
         snapshot.last_manifest_commit(&engine).unwrap(),
         Some(LastManifestCommit::new(0, 0).unwrap())
     );
-}
-
-// A snapshot built without P&M replay (`Snapshot::new`) reads `lastManifestCommit` from its
-// version's commit file on first use and memoizes it.
-#[tokio::test]
-async fn unresolved_snapshot_reads_last_manifest_commit_from_commit_file_once() {
-    let (store, table_root) = manifest_commit_table(&[commit_info(Some((0, 0)))]).await;
-    let engine = non_plan_engine(store.clone());
-    let storage = engine.storage_handler();
-    let log_root = table_root.join("_delta_log/").unwrap();
-    let log_segment =
-        LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)
-            .unwrap();
-    let table_configuration = adaptive_metadata_table_configuration(one_column_schema(), &[]);
-    let snapshot = Snapshot::new(log_segment, table_configuration).unwrap();
-    let expected = Some(LastManifestCommit::new(0, 0).unwrap());
-
-    assert_eq!(snapshot.last_manifest_commit(&engine).unwrap(), expected);
-    store
-        .delete(&delta_path_for_version(1, "json"))
-        .await
-        .unwrap();
-    assert_eq!(snapshot.last_manifest_commit(&engine).unwrap(), expected);
 }
 
 // A read snapshot loaded from a CRC never captures the checkpoint action, so a plain commit's
