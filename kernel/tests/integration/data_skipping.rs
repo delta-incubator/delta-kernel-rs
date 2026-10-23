@@ -43,6 +43,8 @@ use url::Url;
 
 use crate::common::write_utils::set_table_properties;
 
+mod user_defined;
+
 type TestEngine = DefaultEngine<TokioMultiThreadExecutor>;
 
 /// Flat schema with `c0..c4`. `delta.dataSkippingNumIndexedCols=2` keeps stats on `c0` and
@@ -1343,7 +1345,7 @@ async fn interval_partition_values_do_not_prune_files(
 // from `add.stats` at read time). One exception is captured at the assertion: the parallel scan
 // path does not yet read `stats_parsed`, so it cannot skip an all-null file sourced from a
 // struct-only checkpoint.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum AllNullSource {
     /// All-null file added via a JSON commit, with no checkpoint (the pure delta-log path).
     CommitOnly,
