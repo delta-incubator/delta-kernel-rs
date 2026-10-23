@@ -603,8 +603,9 @@ mod tests {
     use delta_kernel::arrow::array::{
         Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
         Int16Array, Int32Array, Int64Array, Int8Array, RecordBatch, StringArray,
-        TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampMicrosecondArray,
     };
+    use delta_kernel::arrow::compute::cast;
     use delta_kernel::arrow::datatypes::{
         DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit,
     };
@@ -893,36 +894,38 @@ mod tests {
         assert_eq!(data[0].num_rows(), 10);
     }
 
-    // A Parquet file can physically store TIMESTAMP(MILLIS) (for example, checkpoint stats
-    // written by a non-kernel writer). End to end, the default engine must (a) convert the
-    // millisecond footer schema to the kernel's microsecond TIMESTAMP / TIMESTAMP_NTZ, and
-    // (b) rescale the values to microseconds (x1000) when reading them into that schema.
+    #[rstest::rstest]
+    #[case::millis(
+        TimeUnit::Millisecond,
+        &[1_700_000_000_123],
+        &[1_700_000_000_123_000]
+    )]
+    #[case::nanos(TimeUnit::Nanosecond, &[1_999, -1_999, 999, -999], &[1, -1, 0, 0])]
     #[tokio::test]
-    async fn test_read_millisecond_timestamps() {
+    async fn test_read_timestamp_units_as_microseconds(
+        #[case] unit: TimeUnit,
+        #[case] values: &[i64],
+        #[case] expected_us: &[i64],
+    ) {
         let temp_dir = tempfile::tempdir().unwrap();
-        let file_path = temp_dir.path().join("ms_timestamps.parquet");
+        let file_path = temp_dir.path().join("timestamps.parquet");
 
-        // 1700000000123 ms since epoch -> 1_700_000_000_123_000 us.
-        let ms: i64 = 1_700_000_000_123;
         let arrow_schema = Arc::new(ArrowSchema::new(vec![
             Field::new(
                 "ts_utc",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                ArrowDataType::Timestamp(unit, Some("UTC".into())),
                 true,
             ),
-            Field::new(
-                "ts_ntz",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                true,
-            ),
+            Field::new("ts_ntz", ArrowDataType::Timestamp(unit, None), true),
         ]));
+        let values = Int64Array::from(values.to_vec());
         let batch = RecordBatch::try_new(
             arrow_schema.clone(),
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![ms]).with_timezone("UTC"))
-                    as Arc<dyn Array>,
-                Arc::new(TimestampMillisecondArray::from(vec![ms])) as Arc<dyn Array>,
-            ],
+            arrow_schema
+                .fields()
+                .iter()
+                .map(|field| cast(&values, field.data_type()).unwrap())
+                .collect(),
         )
         .unwrap();
 
@@ -947,7 +950,7 @@ mod tests {
             Arc::new(TokioBackgroundExecutor::new()),
         );
 
-        // (a) Footer schema: millisecond timestamps convert to the kernel's microsecond types.
+        // Native nanosecond reads require updating timestamp_stat_as_micros and row-group pruning.
         let footer = handler.read_parquet_footer(&file_meta).unwrap();
         assert_eq!(
             footer.schema.field("ts_utc").unwrap().data_type(),
@@ -958,7 +961,6 @@ mod tests {
             &DataType::TIMESTAMP_NTZ
         );
 
-        // (b) Data path: values are rescaled ms -> us when read into the microsecond schema.
         let data: Vec<RecordBatch> = handler
             .read_parquet_files(slice::from_ref(&file_meta), footer.schema.clone(), None)
             .unwrap()
@@ -966,20 +968,17 @@ mod tests {
             .try_collect()
             .unwrap();
 
-        assert_eq!(data.len(), 1);
-        assert_eq!(data[0].num_rows(), 1);
-        let expected_us = ms * 1_000;
         for col_idx in 0..2 {
-            let col = data[0]
-                .column(col_idx)
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .unwrap();
-            assert_eq!(
-                col.value(0),
-                expected_us,
-                "column {col_idx} should be rescaled to us"
-            );
+            let mut actual = Vec::new();
+            for batch in &data {
+                let col = batch
+                    .column(col_idx)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .expect("reader output must use microseconds");
+                actual.extend_from_slice(col.values());
+            }
+            assert_eq!(actual, expected_us, "column {col_idx}");
         }
     }
 
