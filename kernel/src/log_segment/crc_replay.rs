@@ -406,13 +406,8 @@ impl CrcReplayAccumulator {
             LastManifestCommit,
         >,
     ) {
-        if let Some(op) = operation {
-            if is_incremental_safe_operation(op) {
-                self.current_commit_saw_safe_op = true;
-            } else {
-                warn!("CRC reverse-replay: non-incremental op {op}");
-                self.delta.is_incremental_safe = false;
-            }
+        if operation.is_some_and(is_incremental_safe_operation) {
+            self.current_commit_saw_safe_op = true;
         }
         if self.is_first_commit {
             self.delta.in_commit_timestamp = ict;
@@ -775,14 +770,35 @@ mod tests {
     // ===== commitInfo =====
 
     #[rstest::rstest]
-    #[case::safe("WRITE", true)]
-    #[case::streaming_update("STREAMING UPDATE", true)]
-    #[case::unsafe_op("ANALYZE STATS", false)]
-    fn on_commit_info_classifies_operation(#[case] op: &str, #[case] is_safe: bool) {
+    #[case::safe(Some("WRITE"), true)]
+    #[case::streaming_update(Some("STREAMING UPDATE"), true)]
+    #[case::unsafe_op(Some("ANALYZE STATS"), false)]
+    #[case::vacuum_start(Some("VACUUM START"), false)]
+    #[case::vacuum_end(Some("VACUUM END"), false)]
+    #[case::set_properties(Some("SET TBLPROPERTIES"), false)]
+    #[case::missing_operation(None, false)]
+    fn commit_safety_depends_on_operation_only_with_file_actions(
+        #[case] op: Option<&str>,
+        #[case] is_safe: bool,
+        #[values(false, true)] has_file_action: bool,
+        #[values(false, true)] commit_info_first: bool,
+    ) {
         let mut acc = CrcReplayAccumulator::new(None);
-        acc.on_commit_info_without_lmc(Some(op), None);
+        acc.process_batch_start("v1.json");
+        if commit_info_first {
+            acc.on_commit_info_without_lmc(op, None);
+        }
+        acc.process_batch_start("v1.json");
+        if has_file_action {
+            acc.on_add(0).unwrap();
+            acc.on_remove("a", Some(0)).unwrap();
+        }
+        if !commit_info_first {
+            acc.on_commit_info_without_lmc(op, None);
+        }
         assert_eq!(acc.current_commit_saw_safe_op, is_safe);
-        assert_eq!(acc.delta.is_incremental_safe, is_safe);
+        acc.process_commit_file_end();
+        assert_eq!(acc.delta.is_incremental_safe, !has_file_action || is_safe);
     }
 
     #[test]
