@@ -80,8 +80,8 @@ impl<T: TransactionType, MODE: ExecutionMode> TransactionBuilder<T, MODE> {
     ///
     /// The caller must ensure:
     ///
-    /// - `(path, dv_id)` is unique across all AddFile and RemoveFile actions. An action without a
-    ///   deletion vector has `dv_id = None` for this check.
+    /// - `(path, dv_id)` is unique across all AddFile and RemoveFile actions, including actions
+    ///   without a deletion vector (`dv_id = None`).
     /// - Paths are unique among AddFile actions.
     /// - Paths are unique among RemoveFile actions.
     ///

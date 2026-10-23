@@ -100,8 +100,8 @@ impl Validation for MandatoryRemoveFileValidation {
     }
 }
 
-/// Validates selected RemoveFile uniqueness against file actions (addFile, removeFile) in the
-/// transaction.
+/// Validates selected RemoveFile uniqueness against file actions (addFile, removeFile) in
+/// `uniqueness_validator` and records each selected RemoveFile into it.
 struct RemoveFileUniquenessValidation<'a> {
     uniqueness_validator: &'a mut FileActionUniquenessValidator,
 }
