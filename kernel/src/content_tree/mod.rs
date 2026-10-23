@@ -6,6 +6,7 @@
 
 mod action_projector;
 mod builder;
+mod checkpoint_action_stream;
 mod checkpoint_sidecar;
 mod dv_conversion;
 mod reader;
@@ -17,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use bytes::Bytes;
+pub(crate) use checkpoint_action_stream::read_checkpoint_action;
 use delta_kernel_derive::ToSchema;
-pub(crate) use reader::{read_add_actions_from_amt, ReadContext};
 use url::Url;
 
 use crate::engine_data::{EngineData, GetData, TypedGetData as _};

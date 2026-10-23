@@ -17,6 +17,8 @@ use crate::actions::{
 use crate::actions::{CheckpointAction, LastManifestCommit, LOG_CHECKPOINT_SCHEMA};
 use crate::cancellation::CancellationTokenRef;
 use crate::committer::CatalogCommit;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::content_tree::read_checkpoint_action;
 use crate::expressions::ColumnName;
 use crate::last_checkpoint_hint::{HintAction, LastCheckpointHint};
 use crate::log_replay::ActionsBatch;
@@ -48,8 +50,6 @@ use crate::{
     StorageHandler, Version,
 };
 
-#[cfg(feature = "adaptive-metadata-in-dev")]
-mod checkpoint_action_stream;
 mod crc_replay;
 mod domain_metadata_replay;
 mod protocol_metadata_replay;
@@ -64,7 +64,7 @@ mod crc_tests;
 #[cfg(all(test, feature = "adaptive-metadata-in-dev"))]
 mod protocol_metadata_replay_amt_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Statistics for the commit files selected to replay a snapshot's log segment.
 ///
@@ -1025,7 +1025,7 @@ impl LogSegment {
             stats_fallback.into_iter().collect(),
             false,
         )?;
-        let checkpoint_actions = checkpoint_action_stream::read_checkpoint_action(
+        let checkpoint_actions = read_checkpoint_action(
             engine,
             checkpoint,
             &LogRoot::new(table_root.clone())?,
