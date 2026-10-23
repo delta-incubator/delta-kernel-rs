@@ -179,7 +179,7 @@ fn get_segment(
     Ok(log_segment.listed.ascending_commit_files)
 }
 
-fn result_to_sv(iter: impl Iterator<Item = KernelResult<TableChangesScanMetadata>>) -> Vec<bool> {
+fn result_to_sv(iter: impl KernelResultIterator<TableChangesScanMetadata>) -> Vec<bool> {
     iter.map_ok(|scan_metadata| scan_metadata.selection_vector.into_iter())
         .flatten_ok()
         .try_collect()
@@ -371,7 +371,7 @@ impl JsonHandler for BatchingJsonHandler {
     fn write_json_file(
         &self,
         path: &url::Url,
-        data: KernelResultIterator<'_, FilteredEngineData>,
+        data: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         overwrite: bool,
     ) -> KernelResult<FileSize> {
         self.inner.write_json_file(path, data, overwrite)

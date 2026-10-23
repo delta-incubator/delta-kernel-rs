@@ -116,7 +116,8 @@ use update_table::{intermediate_dv_schema, new_dv_column_schema};
 pub use write_state::{BoundWriteContextBuilder, RowTrackingMetadataColumns, WriteState};
 
 /// Type alias for an iterator of [`EngineData`] results.
-pub(crate) type EngineDataResultIterator<'a> = KernelResultIterator<'a, Box<dyn EngineData>>;
+pub(crate) type EngineDataResultIterator<'a> =
+    Box<dyn KernelResultIterator<Box<dyn EngineData>> + 'a>;
 
 /// The static instance referenced by [`add_files_schema`] that doesn't contain the dataChange
 /// column.
@@ -384,9 +385,9 @@ fn build_add_actions<'a, I, T>(
     add_files_metadata: I,
     input_schema: SchemaRef,
     data_change: bool,
-) -> KernelResult<impl Iterator<Item = KernelResult<Box<dyn EngineData>>> + 'a>
+) -> KernelResult<impl KernelResultIterator<Box<dyn EngineData>> + 'a>
 where
-    I: Iterator<Item = KernelResult<T>> + Send + 'a,
+    I: KernelResultIterator<T> + 'a,
     T: Deref<Target = dyn EngineData> + Send + 'a,
 {
     let evaluation_handler = engine.evaluation_handler();
@@ -781,7 +782,7 @@ struct NonfileCommitActions {
 
 /// The encoded commit actions, plus the state the post-commit CRC and snapshot are built from.
 struct CommitBatches<'a> {
-    actions: KernelResultIterator<'a, FilteredEngineData>,
+    actions: Box<dyn KernelResultIterator<FilteredEngineData> + 'a>,
     dm_changes: Vec<DomainMetadata>,
     /// The `checkpoint` action this commit writes, if any (adaptiveMetadata).
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -1640,7 +1641,7 @@ impl<STATE> Transaction<STATE, Imperative> {
     fn perform_commit(
         &self,
         engine: &dyn Engine,
-        actions: KernelResultIterator<'_, FilteredEngineData>,
+        actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         commit_metadata: CommitMetadata,
     ) -> (KernelResult<CommitResponse>, Duration) {
         let committer_start = Instant::now();
@@ -1892,7 +1893,7 @@ impl<STATE> Transaction<STATE, Imperative> {
         engine: &dyn Engine,
         remove_files_metadata: impl Iterator<Item = &'a FilteredEngineData> + Send + 'a,
         has_dv_update_columns: bool,
-    ) -> KernelResult<impl Iterator<Item = KernelResult<FilteredEngineData>> + Send + 'a> {
+    ) -> KernelResult<impl KernelResultIterator<FilteredEngineData> + 'a> {
         // Create-table transactions should not have any remove actions.
         // Only error if there are actually files queued for removal.
         if self.is_create_table() && !self.staged_data_changes.remove_files_metadata.is_empty() {
@@ -2433,7 +2434,7 @@ mod tests {
         fn commit(
             &self,
             _engine: &dyn Engine,
-            _actions: KernelResultIterator<'_, FilteredEngineData>,
+            _actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
             _commit_metadata: CommitMetadata,
         ) -> KernelResult<CommitResponse> {
             Err(KernelError::IOError(std::io::Error::other(
@@ -2460,7 +2461,7 @@ mod tests {
         fn commit(
             &self,
             _engine: &dyn Engine,
-            _actions: KernelResultIterator<'_, FilteredEngineData>,
+            _actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
             _commit_metadata: CommitMetadata,
         ) -> KernelResult<CommitResponse> {
             Err(KernelError::generic("simulated commit error"))
@@ -2484,7 +2485,7 @@ mod tests {
         fn commit(
             &self,
             _engine: &dyn Engine,
-            _actions: KernelResultIterator<'_, FilteredEngineData>,
+            _actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
             _commit_metadata: CommitMetadata,
         ) -> KernelResult<CommitResponse> {
             // This won't be reached in tests — the validation error fires before commit.
@@ -4482,7 +4483,7 @@ mod tests {
         fn commit(
             &self,
             _engine: &dyn Engine,
-            _actions: KernelResultIterator<'_, FilteredEngineData>,
+            _actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
             commit_metadata: CommitMetadata,
         ) -> KernelResult<CommitResponse> {
             *self.captured.lock().unwrap() = Some(commit_metadata.in_commit_timestamp());

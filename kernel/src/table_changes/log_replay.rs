@@ -26,7 +26,7 @@ use crate::table_features::{format_features, Operation, TableFeature};
 use crate::utils::require;
 use crate::{
     Engine, EngineData, ExpressionEvaluator, FileDataReadResultIterator, KernelError, KernelResult,
-    PredicateRef, RowVisitor,
+    KernelResultIterator, PredicateRef, RowVisitor,
 };
 
 #[cfg(test)]
@@ -55,10 +55,10 @@ pub(crate) struct TableChangesScanMetadata {
 pub(crate) fn table_changes_action_iter(
     engine: Arc<dyn Engine>,
     start_table_configuration: &TableConfiguration,
-    commit_files: impl IntoIterator<Item = ParsedLogPath>,
+    commit_files: impl IntoIterator<Item = ParsedLogPath, IntoIter: Send>,
     table_schema: SchemaRef,
     physical_predicate: Option<(PredicateRef, SchemaRef)>,
-) -> KernelResult<impl Iterator<Item = KernelResult<TableChangesScanMetadata>>> {
+) -> KernelResult<impl KernelResultIterator<TableChangesScanMetadata>> {
     // The data-reading (`execute`) path always uses change-data-file semantics.
     table_changes_action_iter_with_mode(
         engine,
@@ -78,11 +78,11 @@ pub(crate) fn table_changes_action_iter(
 pub(crate) fn table_changes_action_iter_with_mode(
     engine: Arc<dyn Engine>,
     start_table_configuration: &TableConfiguration,
-    commit_files: impl IntoIterator<Item = ParsedLogPath>,
+    commit_files: impl IntoIterator<Item = ParsedLogPath, IntoIter: Send>,
     table_schema: SchemaRef,
     physical_predicate: Option<(PredicateRef, SchemaRef)>,
     mode: CdfMode,
-) -> KernelResult<impl Iterator<Item = KernelResult<TableChangesScanMetadata>>> {
+) -> KernelResult<impl KernelResultIterator<TableChangesScanMetadata>> {
     let prepare_schema = replay_schema(PreparePhaseVisitor::schema())?;
     let scan_schema = replay_schema(CommitScanProcessor::schema())?;
 
@@ -217,7 +217,7 @@ impl CommitBatchReader {
     fn batches_for_commit(
         &mut self,
         commit_file_index: usize,
-    ) -> impl Iterator<Item = KernelResult<Box<dyn EngineData>>> + '_ {
+    ) -> impl KernelResultIterator<Box<dyn EngineData>> + '_ {
         let mut finished = false;
         std::iter::from_fn(move || {
             if finished {
@@ -379,7 +379,7 @@ impl LogReplayScanner {
     fn try_new(
         table_configuration: &mut TableConfiguration,
         commit_file: ParsedLogPath,
-        action_batches: impl Iterator<Item = KernelResult<Box<dyn EngineData>>>,
+        action_batches: impl KernelResultIterator<Box<dyn EngineData>>,
         table_schema: &SchemaRef,
         mode: CdfMode,
     ) -> KernelResult<Self> {
