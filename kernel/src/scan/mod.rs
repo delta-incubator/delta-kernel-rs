@@ -642,7 +642,7 @@ impl ScanBuilder {
             state_info: Arc::new(state_info),
             stats: self.stats,
             correlation_id: self.correlation_id,
-            partition_values: self.partition_values_options,
+            partition_values_options: self.partition_values_options,
             cancellation_token: self.cancellation_token,
         })
     }
@@ -901,7 +901,7 @@ pub struct Scan {
     state_info: Arc<StateInfo>,
     stats: StatsOptions,
     correlation_id: Option<Arc<str>>,
-    partition_values: PartitionValuesOptions,
+    partition_values_options: PartitionValuesOptions,
     /// Scan-local token for cached metadata checks and I/O; `None` retains engine I/O
     /// cancellation.
     cancellation_token: Option<CancellationTokenRef>,
@@ -993,8 +993,8 @@ impl Scan {
     /// Build the partition-value read options passed to [`ScanLogReplayProcessor`].
     fn partition_values_options(&self) -> log_replay::ScanPartitionValuesOptions {
         log_replay::ScanPartitionValuesOptions {
-            parsed_struct: self.partition_values.parsed_struct,
-            timestamp_timezone: self.partition_values.timestamp_timezone.clone(),
+            parsed_struct: self.partition_values_options.parsed_struct,
+            timestamp_timezone: self.partition_values_options.timestamp_timezone.clone(),
         }
     }
 
@@ -1137,7 +1137,7 @@ impl Scan {
         require!(
             !table_requires_timestamp_timezone_support(
                 self.snapshot.table_configuration(),
-                &self.partition_values,
+                &self.partition_values_options,
             ),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in scan_metadata_from on \
@@ -1327,7 +1327,7 @@ impl Scan {
         require!(
             !table_requires_timestamp_timezone_support(
                 self.snapshot.table_configuration(),
-                &self.partition_values,
+                &self.partition_values_options,
             ),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in \
@@ -1512,7 +1512,7 @@ impl Scan {
         require!(
             !table_requires_timestamp_timezone_support(
                 self.snapshot.table_configuration(),
-                &self.partition_values,
+                &self.partition_values_options,
             ),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in parallel_scan_metadata on \
