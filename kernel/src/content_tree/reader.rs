@@ -41,7 +41,7 @@ use crate::schema::{
 };
 use crate::{
     Engine, ExpressionEvaluator, FileDataReadResultIterator, FileMeta, KernelError, KernelResult,
-    KernelResultIteratorStatic,
+    KernelResultIterator,
 };
 
 /// Reads the `Add` actions for every live data file in an AMT checkpoint's content tree.
@@ -71,7 +71,7 @@ pub(crate) fn read_add_actions_from_amt(
     table_root: &Url,
     ctx: &ReadContext,
     cancellation_token: Option<&CancellationTokenRef>,
-) -> KernelResult<KernelResultIteratorStatic<FilteredEngineData>> {
+) -> KernelResult<Box<dyn KernelResultIterator<FilteredEngineData>>> {
     let root = checkpoint.root_filemeta(table_root)?;
     let schemas = ManifestReadSchema::new();
     let converter = make_root_entry_converter(engine, ctx)?;
@@ -1345,7 +1345,7 @@ mod tests {
         fn write_parquet_file(
             &self,
             location: Url,
-            data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+            data: Box<dyn KernelResultIterator<Box<dyn EngineData>>>,
         ) -> KernelResult<FileSize> {
             self.inner.write_parquet_file(location, data)
         }

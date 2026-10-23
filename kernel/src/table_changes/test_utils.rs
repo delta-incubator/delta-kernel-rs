@@ -18,7 +18,7 @@ use crate::table_properties::{
     MATERIALIZED_ROW_ID_COLUMN_NAME,
 };
 use crate::unit_test_utils::{Action, MockTableConfigurationBuilder};
-use crate::{Engine, KernelResult, PredicateRef};
+use crate::{Engine, KernelResult, KernelResultIterator, PredicateRef};
 
 pub(crate) const TEST_MATERIALIZED_ROW_ID_COLUMN_NAME: &str = "_row_id";
 pub(crate) const TEST_MATERIALIZED_ROW_COMMIT_VERSION_COLUMN_NAME: &str = "_row_commit_version";
@@ -71,11 +71,11 @@ pub(crate) fn row_tracking_table_config(table_root: Url, schema: SchemaRef) -> T
 pub(crate) fn replay_unmapped_unpartitioned_table_changes(
     engine: Arc<dyn Engine>,
     start_table_configuration: &TableConfiguration,
-    commit_files: impl IntoIterator<Item = ParsedLogPath>,
+    commit_files: impl IntoIterator<Item = ParsedLogPath, IntoIter: Send>,
     read_schema: SchemaRef,
     physical_predicate: Option<(PredicateRef, SchemaRef)>,
     mode: CdfMode,
-) -> KernelResult<impl Iterator<Item = KernelResult<TableChangesScanMetadata>>> {
+) -> KernelResult<impl KernelResultIterator<TableChangesScanMetadata>> {
     let read_configuration =
         TableChangesReadConfiguration::new_unmapped_unpartitioned_for_test(read_schema);
     table_changes_action_iter(
