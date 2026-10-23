@@ -135,9 +135,7 @@ impl CommitRange {
     /// [`CommitOrdering::AscendingOrder`].
     #[internal_api]
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
-    pub(crate) fn commit_files(
-        &self,
-    ) -> KernelResult<impl Iterator<Item = KernelResult<ParsedLogPath>> + Send> {
+    pub(crate) fn commit_files(&self) -> KernelResult<impl KernelResultIterator<ParsedLogPath>> {
         require!(
             self.commit_ordering == CommitOrdering::AscendingOrder,
             KernelError::CommitRange(
