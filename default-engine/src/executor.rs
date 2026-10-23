@@ -55,7 +55,9 @@ pub mod tokio {
 
     use delta_kernel::{KernelError, KernelResult};
     use futures::future::BoxFuture;
-    use futures::{Future, TryFutureExt};
+    use futures::Future;
+    #[cfg(not(feature = "alloc-recovery"))]
+    use futures::TryFutureExt;
     use tokio::runtime::{EnterGuard, Handle, RuntimeFlavor};
 
     use crate::TaskExecutor;
@@ -151,7 +153,9 @@ pub mod tokio {
             // We cannot call `tokio::runtime::Runtime::block_on` here because
             // it panics if called within an async context. So instead we spawn
             // the future on the runtime and send the result back using a channel.
-            let (sender, receiver) = channel::<T::Output>();
+            #[cfg(feature = "alloc-recovery")]
+            let task = crate::alloc_recovery::capture_future(task);
+            let (sender, receiver) = channel();
 
             let fut = Box::pin(async move {
                 let task_output = task.await;
@@ -162,15 +166,20 @@ pub mod tokio {
 
             self.send_future(fut);
 
-            receiver
+            let output = receiver
                 .recv()
-                .expect("TokioBackgroundExecutor has crashed")
+                .expect("TokioBackgroundExecutor has crashed");
+            #[cfg(feature = "alloc-recovery")]
+            let output = crate::alloc_recovery::resume_task(output);
+            output
         }
 
         fn spawn<F>(&self, task: F)
         where
             F: Future<Output = ()> + Send + 'static,
         {
+            #[cfg(feature = "alloc-recovery")]
+            let task = crate::alloc_recovery::capture_spawn(task);
             self.send_future(Box::pin(task));
         }
 
@@ -179,7 +188,7 @@ pub mod tokio {
             T: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
-            Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
+            spawn_blocking(task)
         }
 
         fn enter(&self) -> EnterGuard<'_> {
@@ -261,7 +270,9 @@ pub mod tokio {
             // We cannot call `tokio::runtime::Runtime::block_on` here because
             // it panics if called within an async context. So instead we spawn
             // the future on the runtime and send the result back using a channel.
-            let (sender, receiver) = channel::<T::Output>();
+            #[cfg(feature = "alloc-recovery")]
+            let task = crate::alloc_recovery::capture_future(task);
+            let (sender, receiver) = channel();
 
             let fut = Box::pin(async move {
                 let task_output = task.await;
@@ -279,7 +290,7 @@ pub mod tokio {
                     .expect("TokioMultiThreadExecutor has crashed")
             };
 
-            if tokio::runtime::Handle::try_current().is_ok() {
+            let output = if tokio::runtime::Handle::try_current().is_ok() {
                 // Use block_in_place to tell Tokio we're about to block - this allows
                 // the runtime to move tasks off this worker's local queue so they can
                 // be stolen by other workers. Only use block_in_place if we're inside
@@ -289,13 +300,18 @@ pub mod tokio {
                 // If we're not inside a Tokio runtime, we can't use block_in_place,
                 // so we just block on the receiver.
                 recv()
-            }
+            };
+            #[cfg(feature = "alloc-recovery")]
+            let output = crate::alloc_recovery::resume_task(output);
+            output
         }
 
         fn spawn<F>(&self, task: F)
         where
             F: Future<Output = ()> + Send + 'static,
         {
+            #[cfg(feature = "alloc-recovery")]
+            let task = crate::alloc_recovery::capture_spawn(task);
             self.handle.spawn(task);
         }
 
@@ -304,12 +320,31 @@ pub mod tokio {
             T: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
-            Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
+            spawn_blocking(task)
         }
 
         fn enter(&self) -> EnterGuard<'_> {
             self.handle.enter()
         }
+    }
+
+    fn spawn_blocking<T, R>(task: T) -> BoxFuture<'static, KernelResult<R>>
+    where
+        T: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        #[cfg(feature = "alloc-recovery")]
+        {
+            let task = crate::alloc_recovery::capture_blocking(task);
+            Box::pin(async move {
+                tokio::task::spawn_blocking(task)
+                    .await
+                    .map_err(KernelError::join_failure)
+                    .map(crate::alloc_recovery::resume_task)
+            })
+        }
+        #[cfg(not(feature = "alloc-recovery"))]
+        Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
     }
 
     #[cfg(test)]

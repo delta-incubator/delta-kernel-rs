@@ -81,6 +81,10 @@ pub enum FFIKernelError {
     InvalidGeoParamsError = 52,
     MaxCatalogVersionError = 53,
     TableAlreadyExistsAtPath = 54,
+    /// An allocation would exceed the configured Rust allocation budget.
+    AllocationLimitExceeded = 55,
+    /// The underlying Rust allocator returned null.
+    AllocationFailed = 56,
 }
 
 impl From<KernelError> for FFIKernelError {
@@ -389,7 +393,9 @@ impl From<EngineExecError> for KernelError {
             | FFIKernelError::LogHistoryError
             | FFIKernelError::MissingVersionError
             | FFIKernelError::UnpublishedVersionError
-            | FFIKernelError::StartVersionNotFound) => {
+            | FFIKernelError::StartVersionNotFound
+            | FFIKernelError::AllocationLimitExceeded
+            | FFIKernelError::AllocationFailed) => {
                 KernelError::generic(format!("engine execution error ({code:?}): {message}"))
             }
             #[cfg(feature = "default-engine-base")]

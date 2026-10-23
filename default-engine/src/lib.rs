@@ -30,6 +30,10 @@ use self::filesystem::ObjectStoreStorageHandler;
 use self::json::DefaultJsonHandler;
 use self::parquet::DefaultParquetHandler;
 
+#[cfg(feature = "alloc-recovery")]
+#[doc(hidden)]
+pub mod alloc_recovery;
+
 pub mod executor;
 pub mod file_stream;
 pub mod filesystem;

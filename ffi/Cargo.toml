@@ -94,3 +94,6 @@ adaptive-metadata-in-dev = ["delta_kernel/adaptive-metadata-in-dev"]
 # this crate is also an rlib, so `#[global_allocator]` applies to any Rust binary that
 # links it and conflicts with a binary that installs its own (jemalloc, dhat, ...).
 alloc-tracking = ["dep:peak_alloc"]
+
+# Experimental allocation-failure recovery. Build with the pinned nightly toolchain.
+alloc-recovery = ["alloc-tracking", "dep:delta_kernel_default_engine", "delta_kernel_default_engine/alloc-recovery"]

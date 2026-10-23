@@ -2,6 +2,7 @@
 //!
 //! Exposes that an engine needs to call from C/C++ to interface with kernel
 
+#![cfg_attr(feature = "alloc-recovery", feature(alloc_error_hook))]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // we re-allow panics in tests
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
@@ -50,6 +51,10 @@ use handle::Handle;
 // relies on `crate::`
 extern crate self as delta_kernel_ffi;
 
+#[cfg(all(feature = "alloc-recovery", panic = "abort"))]
+compile_error!("alloc-recovery requires panic=unwind");
+
+mod alloc_recovery;
 mod alloc_stats;
 
 pub mod column_default;
@@ -1373,13 +1378,13 @@ pub unsafe extern "C" fn get_snapshot_builder(
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveSnapshotBuilder>> {
     let engine_ref = unsafe { engine.as_ref() };
-    let engine_arc = unsafe { engine.clone_as_arc() };
-    let url = unsafe { unwrap_and_parse_path_as_url(path) };
-    let source = match url {
-        Ok(url) => FfiSnapshotBuilderSource::TableRoot(url),
-        Err(e) => return KernelResult::Err(e).into_extern_result(&engine_ref),
-    };
-    make_snapshot_builder(source, engine_arc).into_extern_result(&engine_ref)
+    unsafe {
+        alloc_recovery::protect_handle(&engine_ref, || {
+            let engine_arc = engine.clone_as_arc();
+            let url = unwrap_and_parse_path_as_url(path)?;
+            make_snapshot_builder(FfiSnapshotBuilderSource::TableRoot(url), engine_arc)
+        })
+    }
 }
 
 /// Get a builder for incrementally updating an existing snapshot.
@@ -1398,13 +1403,14 @@ pub unsafe extern "C" fn get_snapshot_builder_from(
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveSnapshotBuilder>> {
     let engine_ref = unsafe { engine.as_ref() };
-    let engine_arc = unsafe { engine.clone_as_arc() };
-    let snapshot_arc = unsafe { prev_snapshot.clone_as_arc() };
-    make_snapshot_builder(
-        FfiSnapshotBuilderSource::ExistingSnapshot(snapshot_arc),
-        engine_arc,
-    )
-    .into_extern_result(&engine_ref)
+    unsafe {
+        alloc_recovery::protect_handle(&engine_ref, || {
+            make_snapshot_builder(
+                FfiSnapshotBuilderSource::ExistingSnapshot(prev_snapshot.clone_as_arc()),
+                engine.clone_as_arc(),
+            )
+        })
+    }
 }
 
 /// Sets an explicit target version on a snapshot builder. When omitted, a hinted build uses the
@@ -1510,8 +1516,11 @@ pub unsafe extern "C" fn snapshot_builder_build(
     // Clone the engine Arc before consuming the handle so we can still use it for error reporting
     let engine_arc = unsafe { builder.as_mut() }.engine.clone();
     let engine_ref = engine_arc.as_ref();
+    // Take ownership before entering the recovery boundary so failure always drops the builder.
     let builder_box = unsafe { builder.into_inner() };
-    snapshot_builder_build_impl(*builder_box).into_extern_result(&engine_ref)
+    unsafe {
+        alloc_recovery::protect_handle(&engine_ref, || snapshot_builder_build_impl(*builder_box))
+    }
 }
 
 fn snapshot_builder_build_impl(
