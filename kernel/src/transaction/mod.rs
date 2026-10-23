@@ -49,7 +49,7 @@ use crate::snapshot::{Snapshot, SnapshotRef};
 use crate::struct_patch::ProjectionStructPatchBuilder;
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::TableFeature;
-use crate::utils::{require, PhantomType};
+use crate::utils::{current_time_ms, require, PhantomType};
 use crate::{
     create_row, version_as_i64, DataType, Engine, EngineData, Expression, FileMeta, KernelResult,
     KernelResultIterator, Predicate, RowVisitor, Version,
@@ -439,8 +439,11 @@ impl<STATE> Transaction<STATE, Imperative> {
         ),
         err
     )]
-    pub fn commit(self, engine: &dyn Engine) -> KernelResult<CommitResult<STATE>> {
+    pub fn commit(mut self, engine: &dyn Engine) -> KernelResult<CommitResult<STATE>> {
         let commit_start = Instant::now();
+        // The protocol bases the in-commit timestamp on the time of the commit attempt, so
+        // sample the clock here instead of keeping the time the transaction was built.
+        self.set_commit_timestamp(current_time_ms()?);
 
         // === Pre-commit validation ===
         self.validate_operation_compatibility()?;
@@ -1234,6 +1237,15 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             .read_snapshot()?
             .get_in_commit_timestamp(engine)?
             .map(|prev_ict| self.commit_timestamp.max(prev_ict + 1)))
+    }
+
+    /// Sets the commit-wide timestamp, including the `lastUpdated` of every staged
+    /// [`SetTransaction`], so all timestamps written by this commit stay consistent.
+    fn set_commit_timestamp(&mut self, commit_timestamp: i64) {
+        self.commit_timestamp = commit_timestamp;
+        for set_transaction in &mut self.set_transactions {
+            set_transaction.last_updated = Some(commit_timestamp);
+        }
     }
 
     /// Returns the commit version for this transaction.
@@ -4503,22 +4515,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_commit_metadata_receives_ict_not_wall_time() -> KernelResult<()> {
-        // Set up a table with ICT enabled and a very high previous ICT so that the
-        // monotonicity rule (max(wall_time, prev_ict + 1)) produces a value strictly
-        // greater than the current wall time. This lets us verify the computed ICT is
-        // passed to CommitMetadata (not the wall-clock timestamp).
+    /// Creates a single-commit table with in-commit timestamps enabled whose latest ICT is
+    /// `prev_ict`.
+    fn ict_table_snapshot(
+        prev_ict: i64,
+    ) -> KernelResult<(tempfile::TempDir, SyncEngine, SnapshotRef)> {
         let tempdir = tempfile::tempdir().unwrap();
         let log_dir = tempdir.path().join("_delta_log");
         std::fs::create_dir_all(&log_dir).unwrap();
 
-        let future_ict: i64 = 9_999_999_999_999; // far-future timestamp in ms
         let commit_info = serde_json::json!({
             "commitInfo": {
                 "timestamp": 1000,
                 "operation": "WRITE",
-                "inCommitTimestamp": future_ict
+                "inCommitTimestamp": prev_ict
             }
         });
         let protocol = serde_json::json!({
@@ -4556,6 +4566,18 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
 
+        Ok((tempdir, engine, snapshot))
+    }
+
+    #[test]
+    fn test_commit_metadata_receives_ict_not_wall_time() -> KernelResult<()> {
+        // Set up a table with ICT enabled and a very high previous ICT so that the
+        // monotonicity rule (max(wall_time, prev_ict + 1)) produces a value strictly
+        // greater than the current wall time. This lets us verify the computed ICT is
+        // passed to CommitMetadata (not the wall-clock timestamp).
+        let future_ict: i64 = 9_999_999_999_999; // far-future timestamp in ms
+        let (_tempdir, engine, snapshot) = ict_table_snapshot(future_ict)?;
+
         let prev_ict = snapshot.get_in_commit_timestamp(&engine)?;
         assert_eq!(prev_ict, Some(future_ict));
 
@@ -4582,6 +4604,38 @@ mod tests {
             "CommitMetadata.in_commit_timestamp should be the computed ICT (prev_ict + 1), \
              not the wall-clock time"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_commit_ict_uses_commit_attempt_time() -> KernelResult<()> {
+        let (_tempdir, engine, snapshot) = ict_table_snapshot(1000)?;
+        let (committer, captured_ts) = CapturingCommitter::new();
+        let mut txn = snapshot
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .build(&engine, Box::new(committer))?
+            .with_transaction_id("app".into(), 1);
+        add_dummy_file(&mut txn);
+
+        // Work done between building the transaction and committing it must not make the
+        // ICT predate the commit attempt.
+        std::thread::sleep(Duration::from_millis(20));
+        let attempt_time = current_time_ms()?;
+        let CommitResult::Conflicted(conflicted) = txn.commit(&engine)? else {
+            panic!("Expected Conflicted from capturing committer");
+        };
+
+        let captured = captured_ts
+            .lock()
+            .unwrap()
+            .expect("should have captured a timestamp");
+        assert!(
+            captured >= attempt_time,
+            "ICT {captured} predates the commit attempt at {attempt_time}"
+        );
+        let txn = conflicted.transaction;
+        assert_eq!(txn.commit_timestamp, captured);
+        assert_eq!(txn.set_transactions[0].last_updated, Some(captured));
         Ok(())
     }
 
