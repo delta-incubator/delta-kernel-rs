@@ -297,7 +297,7 @@ impl LogSegment {
     fn read_newest_commit_via_plan(
         executor: &dyn PlanExecutor,
         commit: &ParsedLogPath,
-    ) -> KernelResult<impl Iterator<Item = KernelResult<VersionedBatch>> + Send> {
+    ) -> KernelResult<impl KernelResultIterator<VersionedBatch>> {
         let captured = [&*CHECKPOINT_ACTION_FIELD];
         let scan = PlanBuilder::scan_json(
             Self::version_tagged_scan_files([commit])?,
@@ -394,7 +394,7 @@ impl LogSegment {
         &self,
         executor: &dyn PlanExecutor,
         #[cfg(feature = "adaptive-metadata-in-dev")] capture: Option<&ParsedLogPath>,
-    ) -> KernelResult<impl Iterator<Item = KernelResult<VersionedBatch>> + Send> {
+    ) -> KernelResult<impl KernelResultIterator<VersionedBatch>> {
         let plan = self.build_pm_plan(
             #[cfg(feature = "adaptive-metadata-in-dev")]
             capture,
@@ -846,7 +846,7 @@ fn execute_pm_plan(
     plan: Plan,
     has_checkpoint: bool,
     #[cfg(feature = "adaptive-metadata-in-dev")] end_version: Version,
-) -> KernelResult<impl Iterator<Item = KernelResult<VersionedBatch>> + Send> {
+) -> KernelResult<impl KernelResultIterator<VersionedBatch>> {
     #[cfg(feature = "adaptive-metadata-in-dev")]
     let end_version = version_as_i64(end_version)?;
     let batches = executor
