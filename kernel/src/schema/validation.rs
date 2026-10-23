@@ -27,6 +27,8 @@ pub(crate) fn validate_schema(
     column_mapping_mode: ColumnMappingMode,
     cdf_enabled: bool,
 ) -> KernelResult<()> {
+    #[cfg(feature = "udt-in-dev")]
+    super::udt_utils::validate_udt_write_metadata(schema)?;
     let mut validator = SchemaValidator::new(column_mapping_mode);
     // We reuse the SchemaTransform trait for its recursive traversal machinery.
     // The validator never transforms the schema -- it only inspects fields and
