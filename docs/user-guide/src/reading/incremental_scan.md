@@ -254,12 +254,20 @@ miss them. See [Reading Catalog-Managed Tables](../catalog_managed/reading.md).
 
 The incremental scan is narrower than a full scan. Know these limits before you build on it.
 
-### No predicate or column pushdown
+### No column projection
 
-Unlike `scan_builder`, the incremental scan builder takes no predicate and no projection. It
-reports every added and removed file in the range, so you can't push data skipping or column
-selection into it. Apply any file-level or row-level filtering in your connector after the scan
-returns.
+Unlike `scan_builder`, the incremental scan builder takes no projection.
+
+### Predicate pushdown
+
+Use `with_predicate` for best-effort data skipping on added files, based on file statistics and
+partition values. Predicates don't filter Remove actions. You must still apply the predicate when
+reading the surviving files.
+
+Use `with_partition_values` with `PartitionValuesOptions::with_timestamp_timezone` to configure
+offset-less `TIMESTAMP` partition parsing during data skipping. See
+[Typed partition values](./scan_metadata.md#typed-partition-values) for timezone requirements.
+Incremental scans return raw partition maps; `PartitionValuesOptions::with_struct()` isn't supported.
 
 ### In-range metadata changes aren't surfaced
 
