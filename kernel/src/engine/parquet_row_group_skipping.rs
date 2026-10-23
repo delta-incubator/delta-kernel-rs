@@ -312,8 +312,6 @@ fn timestamp_from_date(days: Option<&i32>) -> Option<Scalar> {
 /// interpretation used for external checkpoints.
 ///
 /// Returns `None` on scaling overflow, so that bound cannot justify skipping a row group.
-/// Nanosecond values truncate toward zero to match the post-read cast to microseconds. Pruning
-/// requires readers to apply the same cast.
 fn timestamp_stat_as_micros(value: i64, column: &ColumnDescriptor) -> Option<i64> {
     let unit = match column.logical_type_ref() {
         Some(LogicalType::Timestamp(timestamp)) => Some(&timestamp.unit),
@@ -322,6 +320,8 @@ fn timestamp_stat_as_micros(value: i64, column: &ColumnDescriptor) -> Option<i64
     match unit {
         Some(TimeUnit::MILLIS) => value.checked_mul(1_000),
         Some(TimeUnit::MICROS) => Some(value),
+        // Match the reader's microsecond cast, which truncates toward zero even for negatives.
+        // Pruning could drop matching rows if predicates were evaluated at nanosecond precision.
         Some(TimeUnit::NANOS) => Some(value / 1_000),
         None => match column.converted_type() {
             ConvertedType::TIMESTAMP_MILLIS => value.checked_mul(1_000),
