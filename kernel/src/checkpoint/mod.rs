@@ -506,6 +506,10 @@ impl CheckpointWriter {
     /// 1. The checkpoint data iterator has been fully exhausted
     /// 2. All data has been successfully written to object storage
     ///
+    /// This method records the schema of the [`Self::checkpoint_data`] batches as the
+    /// `checkpointSchema` of `_last_checkpoint`, so the checkpoint file must keep exactly the
+    /// columns of those batches.
+    ///
     /// # Parameters
     /// - `engine`: Implementation of [`Engine`] APIs. This method writes `_last_checkpoint` with
     ///   [`StorageHandler::put`](crate::StorageHandler::put).
@@ -518,8 +522,18 @@ impl CheckpointWriter {
         engine: &dyn Engine,
         last_checkpoint_stats: &LastCheckpointHintStats,
     ) -> KernelResult<()> {
-        // Skip writing `_last_checkpoint` if the existing hint already points to a newer
-        // checkpoint, to avoid regressing the hint.
+        self.write_last_checkpoint(engine, last_checkpoint_stats)?;
+        Ok(())
+    }
+
+    /// Writes the `_last_checkpoint` hint for this checkpoint and returns it. Returns `None` and
+    /// writes nothing if the existing hint already points to a newer checkpoint, so that the hint
+    /// does not regress.
+    pub(crate) fn write_last_checkpoint(
+        &self,
+        engine: &dyn Engine,
+        last_checkpoint_stats: &LastCheckpointHintStats,
+    ) -> KernelResult<Option<LastCheckpointHint>> {
         let checkpoint_version = self.snapshot.version();
         if let Some(hint_version) = self.snapshot.log_segment().last_checkpoint_version() {
             if hint_version > checkpoint_version {
@@ -528,18 +542,20 @@ impl CheckpointWriter {
                     checkpoint_version,
                     "Skipping _last_checkpoint write: existing hint is newer than checkpoint"
                 );
-                return Ok(());
+                return Ok(None);
             }
         }
 
-        let hint =
-            LastCheckpointHint::for_classic_checkpoint(checkpoint_version, last_checkpoint_stats);
+        let hint = LastCheckpointHint::for_classic_checkpoint(
+            checkpoint_version,
+            last_checkpoint_stats,
+            self.output_schema.clone(),
+        )?;
         hint.write(
             engine.storage_handler().as_ref(),
             &self.snapshot.log_segment().log_root,
         )?;
-
-        Ok(())
+        Ok(Some(hint))
     }
 
     pub(crate) fn write_v2_checkpoint_with_sidecars(

@@ -26,7 +26,8 @@ use crate::log_replay::HasSelectionVector;
 use crate::object_store::memory::InMemory;
 use crate::object_store::path::Path;
 use crate::object_store::ObjectStoreExt as _;
-use crate::schema::{schema_ref, DataType as KernelDataType, StructField};
+use crate::schema::{schema_ref, DataType as KernelDataType, SchemaRef, StructField};
+use crate::snapshot::CheckpointWriteResult;
 use crate::table_features::TableFeature;
 use crate::transaction::create_table::create_table;
 use crate::transaction::UpdateTableOperation;
@@ -278,6 +279,7 @@ async fn assert_last_checkpoint_contents(
     expected_size: u64,
     expected_num_add_files: u64,
     expected_size_in_bytes: u64,
+    expected_checkpoint_schema: &SchemaRef,
 ) -> KernelResult<()> {
     let last_checkpoint_data = read_last_checkpoint_file(store).await?;
     let expected_data = json!({
@@ -285,6 +287,7 @@ async fn assert_last_checkpoint_contents(
         "size": expected_size,
         "sizeInBytes": expected_size_in_bytes,
         "numOfAddFiles": expected_num_add_files,
+        "checkpointSchema": expected_checkpoint_schema,
     });
     assert_eq!(last_checkpoint_data, expected_data);
     Ok(())
@@ -365,13 +368,14 @@ async fn test_v1_checkpoint_latest_version_by_default() -> KernelResult<()> {
         last_modified: 0,
         size: size_in_bytes,
     };
+    let checkpoint_schema = writer.output_schema.clone();
     try_finalize_checkpoint(writer, &engine, &metadata, data_iter)?;
     // Asserts the checkpoint file contents:
     // - version: latest version (2)
     // - size: 1 metadata + 1 protocol + 1 add action + 1 remove action
     // - numOfAddFiles: 1 add file from 2nd commit (fake_path_2)
     // - sizeInBytes: passed to finalize (10)
-    assert_last_checkpoint_contents(&store, 2, 4, 1, size_in_bytes).await?;
+    assert_last_checkpoint_contents(&store, 2, 4, 1, size_in_bytes, &checkpoint_schema).await?;
 
     Ok(())
 }
@@ -433,13 +437,14 @@ async fn test_v1_checkpoint_specific_version() -> KernelResult<()> {
         last_modified: 0,
         size: size_in_bytes,
     };
+    let checkpoint_schema = writer.output_schema.clone();
     try_finalize_checkpoint(writer, &engine, &metadata, data_iter)?;
     // Asserts the checkpoint file contents:
     // - version: specified version (0)
     // - size: 1 metadata + 1 protocol
     // - numOfAddFiles: no add files in version 0
     // - sizeInBytes: passed to finalize (10)
-    assert_last_checkpoint_contents(&store, 0, 2, 0, size_in_bytes).await?;
+    assert_last_checkpoint_contents(&store, 0, 2, 0, size_in_bytes, &checkpoint_schema).await?;
 
     Ok(())
 }
@@ -598,13 +603,14 @@ async fn test_v2_checkpoint_supported_table() -> KernelResult<()> {
         last_modified: 0,
         size: size_in_bytes,
     };
+    let checkpoint_schema = writer.output_schema.clone();
     try_finalize_checkpoint(writer, &engine, &metadata, data_iter)?;
     // Asserts the checkpoint file contents:
     // - version: latest version (1)
     // - size: 1 metadata + 1 protocol + 1 add action + 1 remove action + 1 checkpointMetadata
     // - numOfAddFiles: 1 add file from version 0
     // - sizeInBytes: passed to finalize (10)
-    assert_last_checkpoint_contents(&store, 1, 5, 1, size_in_bytes).await?;
+    assert_last_checkpoint_contents(&store, 1, 5, 1, size_in_bytes, &checkpoint_schema).await?;
 
     Ok(())
 }
@@ -767,13 +773,17 @@ async fn test_snapshot_checkpoint() -> KernelResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let snapshot = Snapshot::builder_for(table_root.clone()).build(&engine)?;
+    let checkpoint_schema = snapshot
+        .clone()
+        .create_checkpoint_writer(&engine)?
+        .output_schema;
 
     snapshot.checkpoint(&engine, None)?;
 
     // First checkpoint: 1 metadata + 1 protocol + 5 add + 3 remove = 10, numOfAddFiles = 5
     let checkpoint_path = Path::from("_delta_log/00000000000000000004.checkpoint.parquet");
     let checkpoint_size = store.head(&checkpoint_path).await?.size;
-    assert_last_checkpoint_contents(&store, 4, 10, 5, checkpoint_size).await?;
+    assert_last_checkpoint_contents(&store, 4, 10, 5, checkpoint_size, &checkpoint_schema).await?;
 
     // Version 5: add 2 files, remove 1
     write_commit_to_store(
@@ -797,7 +807,7 @@ async fn test_snapshot_checkpoint() -> KernelResult<()> {
     // Second checkpoint: 1 metadata + 1 protocol + 7 add + 4 remove = 13, numOfAddFiles = 7
     let checkpoint_path = Path::from("_delta_log/00000000000000000006.checkpoint.parquet");
     let checkpoint_size = store.head(&checkpoint_path).await?.size;
-    assert_last_checkpoint_contents(&store, 6, 13, 7, checkpoint_size).await?;
+    assert_last_checkpoint_contents(&store, 6, 13, 7, checkpoint_size, &checkpoint_schema).await?;
 
     Ok(())
 }
@@ -976,45 +986,50 @@ async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer(
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;
 
-    // Version 1
-    add_commit(
-        table_root.as_str(),
-        store.as_ref(),
-        1,
-        actions_to_string(vec![TestAction::Add("file1.parquet".to_string())]),
-    )
-    .await
-    .map_err(|err| crate::KernelError::generic(err.to_string()))?;
+    for version in 1..=3 {
+        add_commit(
+            table_root.as_str(),
+            store.as_ref(),
+            version,
+            actions_to_string(vec![TestAction::Add(format!("file{version}.parquet"))]),
+        )
+        .await
+        .map_err(|err| crate::KernelError::generic(err.to_string()))?;
+    }
 
-    // Version 2
-    add_commit(
-        table_root.as_str(),
-        store.as_ref(),
-        2,
-        actions_to_string(vec![TestAction::Add("file2.parquet".to_string())]),
-    )
-    .await
-    .map_err(|err| crate::KernelError::generic(err.to_string()))?;
-
-    // Checkpoint at version 2
-    let snapshot_v2 = Snapshot::builder_for(table_root.clone()).build(&engine)?;
-    assert_eq!(snapshot_v2.version(), 2);
-    snapshot_v2.checkpoint(&engine, None)?;
-    let last_checkpoint = read_last_checkpoint_file(&store).await?;
-    let size_in_bytes = last_checkpoint
-        .get("sizeInBytes")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            crate::KernelError::generic("missing or invalid sizeInBytes in _last_checkpoint")
-        })?;
-    assert_last_checkpoint_contents(&store, 2, 4, 2, size_in_bytes).await?;
+    // Checkpoint at version 3
+    let snapshot_v3 = Snapshot::builder_for(table_root.clone()).build(&engine)?;
+    assert_eq!(snapshot_v3.version(), 3);
+    let checkpoint_schema = snapshot_v3
+        .clone()
+        .create_checkpoint_writer(&engine)?
+        .output_schema;
+    snapshot_v3.checkpoint(&engine, None)?;
+    let checkpoint_path = Path::from("_delta_log/00000000000000000003.checkpoint.parquet");
+    let size_in_bytes = store.head(&checkpoint_path).await?.size;
+    assert_last_checkpoint_contents(&store, 3, 5, 3, size_in_bytes, &checkpoint_schema).await?;
+    let hint_at_version_3 = read_last_checkpoint_file(&store).await?;
 
     // Time-travel to version 1 and writing a checkpoint should not override _last_checkpoint
     let snapshot_v1 = Snapshot::builder_for(table_root)
         .at_version(1)
         .build(&engine)?;
-    snapshot_v1.checkpoint(&engine, None)?;
-    assert_last_checkpoint_contents(&store, 2, 4, 2, size_in_bytes).await
+    let (_, checkpointed_v1) = snapshot_v1.checkpoint(&engine, None)?;
+    assert_eq!(read_last_checkpoint_file(&store).await?, hint_at_version_3);
+
+    // The returned snapshot keeps the newer hint, which does not apply to its checkpoint.
+    let segment = checkpointed_v1.log_segment();
+    assert_eq!(segment.last_checkpoint_version(), Some(3));
+    assert!(segment.checkpoint_hint().is_none());
+
+    // So a checkpoint of an update of that snapshot does not regress _last_checkpoint either.
+    let (result, _) = Snapshot::builder_from(checkpointed_v1)
+        .at_version(2)
+        .build(&engine)?
+        .checkpoint(&engine, None)?;
+    assert_eq!(result, CheckpointWriteResult::Written);
+    assert_eq!(read_last_checkpoint_file(&store).await?, hint_at_version_3);
+    Ok(())
 }
 
 /// Helper to create metadata action with specific stats settings

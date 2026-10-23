@@ -965,6 +965,9 @@ pub trait ParquetHandler: AsAny {
     /// This will overwrite the file if it already exists. For filesystem-backed
     /// implementations, the parent directories must be created if they do not exist.
     ///
+    /// The file must have the schema of `data`, because kernel records that schema in
+    /// `_last_checkpoint` for a checkpoint.
+    ///
     /// # Parquet field IDs
     ///
     /// The engine must write a Parquet `field_id` correctly when the kernel
