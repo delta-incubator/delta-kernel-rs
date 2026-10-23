@@ -509,7 +509,11 @@ fn rejects_out_of_order_batches() {
     assert!(reader.next_batch_for_commit(0).unwrap().is_some());
     assert!(reader.next_batch_for_commit(0).unwrap().is_none());
     assert!(reader.next_batch_for_commit(1).unwrap().is_some());
-    assert_result_error_with_message(reader.next_batch_for_commit(1), "out-of-order");
+    assert_result_error_with_message(
+        reader.next_batch_for_commit(1),
+        "out-of-order JSON batch for commit file index 0 while reading commit file index 1; \
+         JsonHandler::read_json_files must return batches in requested-file order",
+    );
 }
 
 #[rstest]

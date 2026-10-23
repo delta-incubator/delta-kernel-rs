@@ -194,6 +194,11 @@ impl TableChangesReplay {
     }
 }
 
+/// Groups an ordered multi-file JSON stream into per-commit batch streams.
+///
+/// Callers must request commits in file order and drain each commit before advancing. The reader
+/// buffers the first batch of the next nonempty commit as lookahead and treats commits without
+/// nonempty batches as empty.
 struct CommitBatchReader {
     file_indices: Arc<HashMap<String, usize>>,
     batches: std::iter::Fuse<FileDataReadResultIterator>,
@@ -257,7 +262,8 @@ impl CommitBatchReader {
         match batch_file_index.cmp(&commit_file_index) {
             Ordering::Less => Err(KernelError::internal_error(format!(
                 "table_changes received an out-of-order JSON batch for commit file index \
-                 {batch_file_index}"
+                 {batch_file_index} while reading commit file index {commit_file_index}; \
+                 JsonHandler::read_json_files must return batches in requested-file order"
             ))),
             Ordering::Equal => Ok(Some(batch)),
             Ordering::Greater => {
@@ -278,8 +284,13 @@ struct FilePathVisitor {
 
 impl RowVisitor for FilePathVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
-            LazyLock::new(|| (vec![column_name!("_file")], vec![DataType::STRING]).into());
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            (
+                vec![column_name!(FILE_PATH_COLUMN_NAME)],
+                vec![DataType::STRING],
+            )
+                .into()
+        });
         NAMES_AND_TYPES.as_ref()
     }
 
