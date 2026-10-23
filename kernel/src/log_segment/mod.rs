@@ -1859,7 +1859,8 @@ fn validate_checkpoint_parts(parts: &[ParsedLogPath]) -> KernelResult<()> {
     Ok(())
 }
 
-fn validate_commit_file_types(commits: &[ParsedLogPath]) -> KernelResult<()> {
+/// Validates that every entry is a published or staged commit file.
+pub(crate) fn validate_commit_file_types(commits: &[ParsedLogPath]) -> KernelResult<()> {
     for f in commits {
         if !f.is_commit() {
             return Err(KernelError::invalid_log_segment(
@@ -1870,7 +1871,8 @@ fn validate_commit_file_types(commits: &[ParsedLogPath]) -> KernelResult<()> {
     Ok(())
 }
 
-fn validate_commit_files_sorted(commits: &[ParsedLogPath]) -> KernelResult<()> {
+/// Validates that commit versions are in strictly increasing order.
+pub(crate) fn validate_commit_files_sorted(commits: &[ParsedLogPath]) -> KernelResult<()> {
     if let Some(pair) = commits
         .windows(2)
         .find(|pair| pair[0].version >= pair[1].version)
@@ -1906,7 +1908,8 @@ pub(crate) fn validate_start_version_available(
     }
 }
 
-fn validate_commit_files_contiguous(commits: &[ParsedLogPath]) -> KernelResult<()> {
+/// Validates that each commit version immediately follows the previous version.
+pub(crate) fn validate_commit_files_contiguous(commits: &[ParsedLogPath]) -> KernelResult<()> {
     for pair in commits.windows(2) {
         let Some(expected_version) = pair[0].version.checked_add(1) else {
             return Err(KernelError::invalid_log_segment(format!(
