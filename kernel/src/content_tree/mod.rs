@@ -6,6 +6,7 @@
 
 mod action_projector;
 mod builder;
+mod checkpoint_sidecar;
 mod dv_conversion;
 mod reader;
 pub(crate) mod stats;
