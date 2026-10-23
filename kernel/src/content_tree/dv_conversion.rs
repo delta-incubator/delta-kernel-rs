@@ -1,7 +1,9 @@
 use std::sync::LazyLock;
 
+use url::Url;
+
 use crate::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
-use crate::amt_path_util::validate_table_relative;
+use crate::amt_path_util::{resolve_amt_location, validate_table_relative};
 use crate::content_tree::DeletionVectorInfo;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{ArrayData, Scalar};
@@ -60,6 +62,51 @@ pub(crate) fn extract_deletion_vector_content(
         cardinality: dv.cardinality,
         key_metadata: None,
     })
+}
+
+/// Converts an AMT entry's deletion vector back into the [`DeletionVectorDescriptor`] an `Add`
+/// carries: the inverse of [`extract_deletion_vector_content`].
+///
+/// The descriptor is always `PersistedAbsolute`: the DV's raw `location` is resolved against
+/// `table_root` when relative and percent-encoded, as Delta `p` paths are URIs. Log replay
+/// normalizes DV identities, so it still matches the `u` or `p` descriptor the writer started from.
+pub(crate) fn deletion_vector_descriptor_from_info(
+    info: &DeletionVectorInfo,
+    table_root: &Url,
+) -> KernelResult<DeletionVectorDescriptor> {
+    let location = &info.location;
+    if info.key_metadata.is_some() {
+        return Err(KernelError::unsupported(format!(
+            "Encrypted deletion vectors are not supported (deletion vector '{location}' has \
+             keyMetadata)"
+        )));
+    }
+    let absolute_path = resolve_amt_location(location, table_root)?;
+    let offset = i32::try_from(info.offset).map_err(|_| {
+        KernelError::DeletionVector(format!(
+            "Deletion vector '{location}' offset {} does not fit in an i32",
+            info.offset
+        ))
+    })?;
+    // Undo the +8 framing of `extract_deletion_vector_content`.
+    let size_in_bytes = info
+        .size_in_bytes
+        .checked_sub(8)
+        .filter(|size| *size >= 0)
+        .and_then(|size| i32::try_from(size).ok())
+        .ok_or_else(|| {
+            KernelError::DeletionVector(format!(
+                "Deletion vector '{location}' sizeInBytes {} is not a valid Iceberg blob size",
+                info.size_in_bytes
+            ))
+        })?;
+    DeletionVectorDescriptor::try_new(
+        DeletionVectorStorageType::PersistedAbsolute,
+        absolute_path,
+        Some(offset),
+        size_in_bytes,
+        info.cardinality,
+    )
 }
 
 /// Intermediate flat decoded-DV columns: path resolved (base85-decoded for relative DVs, verbatim
@@ -238,6 +285,7 @@ mod tests {
 
     use super::*;
     use crate::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
+    use crate::content_tree::test_utils::test_dv_info;
     use crate::engine::sync::SyncEngine;
     use crate::expressions::StructData;
     use crate::schema::{schema_ref, ColumnNamesAndTypes, StructField, StructType, ToSchema};
@@ -647,6 +695,122 @@ mod tests {
         assert!(
             err.contains(expected_error),
             "error {err:?} did not contain {expected_error:?}"
+        );
+    }
+
+    /// The table root the inverse-conversion tests resolve DV locations against.
+    fn table_root() -> Url {
+        Url::parse("s3://bucket/table/").unwrap()
+    }
+
+    // Every Delta descriptor the write path accepts reads back from the content tree as a
+    // `PersistedAbsolute` descriptor for the same file and blob, with the same normalized identity
+    // so log replay matches it against actions carrying the original.
+    #[rstest]
+    #[case::relative(
+        (DeletionVectorStorageType::PersistedRelative, "ab^-aqEH.-t@S}K{vb[*k^"),
+        "s3://bucket/table/ab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin"
+    )]
+    #[case::relative_no_prefix(
+        (DeletionVectorStorageType::PersistedRelative, "vBn[lx{q8@P<9BNH/isA"),
+        "s3://bucket/table/deletion_vector_61d16c75-6994-46b7-a15b-8b538852e50e.bin"
+    )]
+    #[case::unencoded_relative(
+        (DeletionVectorStorageType::PersistedUnencodedRelative, "data/dv.bin"),
+        "s3://bucket/table/data/dv.bin"
+    )]
+    #[case::absolute_in_root(
+        (DeletionVectorStorageType::PersistedAbsolute, "s3://bucket/table/data/dv.bin"),
+        "s3://bucket/table/data/dv.bin"
+    )]
+    #[case::absolute_outside_root(
+        (DeletionVectorStorageType::PersistedAbsolute, ABSOLUTE_DV_PATH),
+        ABSOLUTE_DV_PATH
+    )]
+    fn test_deletion_vector_descriptor_from_info_inverts_extraction(
+        #[case] (storage_type, path): (DeletionVectorStorageType, &str),
+        #[case] expected_path: &str,
+    ) -> KernelResult<()> {
+        let original = dv((storage_type, path, Some(4), 40));
+        let info = extract_deletion_vector_content(&original)?;
+        let descriptor = deletion_vector_descriptor_from_info(&info, &table_root())?;
+
+        let expected = DeletionVectorDescriptor {
+            storage_type: DeletionVectorStorageType::PersistedAbsolute,
+            path_or_inline_dv: expected_path.to_string(),
+            ..original.clone()
+        };
+        assert_eq!(descriptor, expected);
+        let unique_id = |dv: &DeletionVectorDescriptor| {
+            DeletionVectorDescriptor::normalized_unique_id_from_parts(
+                dv.storage_type,
+                &dv.path_or_inline_dv,
+                dv.offset,
+                &table_root(),
+            )
+        };
+        assert_eq!(unique_id(&descriptor)?, unique_id(&original)?);
+        Ok(())
+    }
+
+    // Raw content-tree locations resolve against the table root and are percent-encoded.
+    #[rstest]
+    #[case::relative("data/dv file.puffin", "s3://bucket/table/data/dv%20file.puffin")]
+    #[case::absolute_in_root(
+        "s3://bucket/table/data/dv file.puffin",
+        "s3://bucket/table/data/dv%20file.puffin"
+    )]
+    #[case::absolute_outside_root("s3://other/dv file.puffin", "s3://other/dv%20file.puffin")]
+    fn test_deletion_vector_descriptor_from_info_resolves_location(
+        #[case] location: &str,
+        #[case] expected_path: &str,
+    ) -> KernelResult<()> {
+        let info = DeletionVectorInfo {
+            location: location.to_string(),
+            ..test_dv_info()
+        };
+        let descriptor = deletion_vector_descriptor_from_info(&info, &table_root())?;
+        assert_eq!(
+            descriptor.storage_type,
+            DeletionVectorStorageType::PersistedAbsolute
+        );
+        assert_eq!(descriptor.path_or_inline_dv, expected_path);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::key_metadata(
+        DeletionVectorInfo { key_metadata: Some(bytes::Bytes::from_static(b"k")), ..test_dv_info() },
+        "Encrypted deletion vectors are not supported"
+    )]
+    #[case::size_below_framing(
+        DeletionVectorInfo { size_in_bytes: 7, ..test_dv_info() },
+        "not a valid Iceberg blob size"
+    )]
+    #[case::size_overflow(
+        DeletionVectorInfo { size_in_bytes: i64::from(i32::MAX) + 9, ..test_dv_info() },
+        "not a valid Iceberg blob size"
+    )]
+    #[case::negative_offset(DeletionVectorInfo { offset: -1, ..test_dv_info() }, "offset must be non-negative")]
+    #[case::offset_overflow(
+        DeletionVectorInfo { offset: i64::from(i32::MAX) + 1, ..test_dv_info() },
+        "does not fit in an i32"
+    )]
+    #[case::negative_cardinality(
+        DeletionVectorInfo { cardinality: -1, ..test_dv_info() },
+        "cardinality must be non-negative"
+    )]
+    #[case::dot_segment(
+        DeletionVectorInfo { location: "s3://bucket/table/../dv.bin".to_string(), ..test_dv_info() },
+        "contains a '.' or '..' segment"
+    )]
+    fn test_deletion_vector_descriptor_from_info_error(
+        #[case] info: DeletionVectorInfo,
+        #[case] expected_error: &str,
+    ) {
+        assert_result_error_with_message(
+            deletion_vector_descriptor_from_info(&info, &table_root()),
+            expected_error,
         );
     }
 }
