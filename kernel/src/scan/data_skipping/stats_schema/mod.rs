@@ -359,10 +359,8 @@ impl<'a> SchemaTransform<'a> for BaseStatsTransform<'_> {
         self.include_leaf().then_some(Cow::Borrowed(vtype))
     }
 
-    /// A `file` column is excluded from statistics for now. Its statistics are per-leaf (null
-    /// counts on all six fields, min/max on four), which is not implemented yet, and the stats
-    /// shape must not be fixed before it is. Omitting statistics for a column is always valid.
-    /// The inner fields are protocol-defined, not user columns, so they are not recursed into.
+    /// A `file` column is excluded from statistics. Its inner fields are protocol-defined, not
+    /// user columns, so they are not recursed into.
     fn transform_file(&mut self, _stype: &'a StructType) -> Option<Cow<'a, StructType>> {
         None
     }
@@ -929,8 +927,8 @@ mod tests {
         );
     }
 
-    /// A `file` column has no statistics yet, and must not use up a slot of the indexed-column
-    /// limit, so the columns around it keep theirs.
+    /// A `file` column is excluded from statistics and takes no slot of the indexed-column limit,
+    /// so the columns around it keep theirs.
     #[test]
     fn test_stats_schema_excludes_file_columns() {
         let properties: TableProperties = [(

@@ -199,9 +199,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     ) -> KernelResult<DataFileMetadata> {
         if let Some(column) = find_file_column(physical_schema) {
             return Err(KernelError::unsupported(format!(
-                "The default Parquet writer cannot write `file` column '{column}' yet: it does not \
-                 write the Parquet FILE annotation or the sub-field field ids that the File type \
-                 requires. Use a Parquet writer that does."
+                "The default Parquet writer does not support writing `file` column '{column}'."
             )));
         }
 
@@ -1195,8 +1193,7 @@ mod tests {
         assert_eq!(data[0].num_rows(), 3);
     }
 
-    /// Until it writes the Parquet FILE annotation and the sub-field field ids, the default writer
-    /// refuses a `file` column wherever it appears, and writes nothing.
+    /// The default writer refuses a `file` column wherever it appears, and writes nothing.
     #[rstest::rstest]
     #[case::top_level(schema! { nullable "f": (DataType::file_type()) }, "f")]
     #[case::in_struct(schema! { nullable "s": { nullable "f": (DataType::file_type()) } }, "s.f")]
@@ -1242,7 +1239,9 @@ mod tests {
             .to_string();
 
         assert!(
-            error.contains(&format!("cannot write `file` column '{column}'")),
+            error.contains(&format!(
+                "does not support writing `file` column '{column}'"
+            )),
             "got: {error}"
         );
         assert!(store.list(None).next().await.is_none());

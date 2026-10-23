@@ -385,7 +385,7 @@ fn maybe_enable_variant_type(schema: &SchemaRef, validated: &mut ValidatedTableP
 ///
 /// The stable `fileType` feature is deliberately not written: the protocol change is still only
 /// proposed, and a stable feature name is permanent once it is in a table's protocol.
-fn maybe_enable_file_type(schema: &SchemaRef, validated: &mut ValidatedTableProperties) {
+fn maybe_enable_file_type_preview(schema: &SchemaRef, validated: &mut ValidatedTableProperties) {
     if schema_contains_file_type(schema) {
         add_feature_to_lists(
             TableFeature::FileTypePreview,
@@ -1037,7 +1037,7 @@ impl TransactionBuilder<CreateTable> {
 
         // Schema-driven auto-enablement: detect types or annotations that require a feature
         maybe_enable_variant_type(&effective_schema, &mut validated);
-        maybe_enable_file_type(&effective_schema, &mut validated);
+        maybe_enable_file_type_preview(&effective_schema, &mut validated);
         maybe_enable_timestamp_ntz(&effective_schema, &mut validated);
         maybe_enable_invariants(&effective_schema, &mut validated);
 
@@ -1742,7 +1742,7 @@ mod tests {
         };
 
         maybe_enable_variant_type(&schema, &mut validated);
-        maybe_enable_file_type(&schema, &mut validated);
+        maybe_enable_file_type_preview(&schema, &mut validated);
         maybe_enable_timestamp_ntz(&schema, &mut validated);
 
         for feature in expected_features {
