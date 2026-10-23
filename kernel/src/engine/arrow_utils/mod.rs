@@ -1105,39 +1105,21 @@ fn reorder_list<O: OffsetSizeTrait>(
     list_nullable: bool,
     children: &[ReorderIndex],
 ) -> KernelResult<FieldArrayOpt> {
-    let (list_values_field, offset_buffer, maybe_sa, null_buf) = list_array.into_parts();
-    if let Some(struct_array) = maybe_sa.as_struct_opt() {
-        let struct_array = struct_array.clone();
-        let result_array = Arc::new(reorder_struct_array(
-            struct_array,
-            children,
-            None, /* Nested structures don't need row indexes since metadata columns can't be
-                   * nested */
-            None, // No file_location passed since metadata columns can't be nested
-        )?);
-        let new_list_field = Arc::new(ArrowField::new_struct(
-            list_values_field.name(),
-            result_array.fields().clone(),
-            result_array.is_nullable(),
-        ));
-        let list = Arc::new(GenericListArray::try_new(
-            new_list_field,
-            offset_buffer,
-            result_array,
-            null_buf,
-        )?);
-        // Take the field's type from the rebuilt array so a LargeList isn't forced to List.
-        let new_field = Arc::new(ArrowField::new(
-            input_field_name,
-            list.data_type().clone(),
-            list_nullable,
-        ));
-        Ok(Some((new_field, list)))
-    } else {
-        Err(KernelError::internal_error(
-            "Nested reorder of list should have had struct child.",
-        ))
-    }
+    let (values_field, offset_buffer, values, null_buf) = list_array.into_parts();
+    let (new_values_field, values) = reorder_list_values(values_field, values, children)?;
+    let list = Arc::new(GenericListArray::try_new(
+        new_values_field,
+        offset_buffer,
+        values,
+        null_buf,
+    )?);
+    // Take the field's type from the rebuilt array so a LargeList isn't forced to List.
+    let new_field = Arc::new(ArrowField::new(
+        input_field_name,
+        list.data_type().clone(),
+        list_nullable,
+    ));
+    Ok(Some((new_field, list)))
 }
 
 fn reorder_list_view<O: OffsetSizeTrait>(
@@ -1147,39 +1129,50 @@ fn reorder_list_view<O: OffsetSizeTrait>(
     children: &[ReorderIndex],
 ) -> KernelResult<FieldArrayOpt> {
     let (values_field, offsets, sizes, values, null_buf) = list_view_array.into_parts();
-    if let Some(struct_array) = values.as_struct_opt() {
-        let struct_array = struct_array.clone();
-        let result_array = Arc::new(reorder_struct_array(
-            struct_array,
-            children,
-            None, /* Nested structures don't need row indexes since metadata columns can't be
-                   * nested */
-            None, // No file_location passed since metadata columns can't be nested
-        )?);
-        let new_values_field = Arc::new(ArrowField::new_struct(
-            values_field.name(),
-            result_array.fields().clone(),
-            result_array.is_nullable(),
+    let (new_values_field, values) = reorder_list_values(values_field, values, children)?;
+    let list_view = Arc::new(GenericListViewArray::try_new(
+        new_values_field,
+        offsets,
+        sizes,
+        values,
+        null_buf,
+    )?);
+    // Take the field's type from the rebuilt array so a LargeListView isn't forced to ListView.
+    let new_field = Arc::new(ArrowField::new(
+        input_field_name,
+        list_view.data_type().clone(),
+        list_nullable,
+    ));
+    Ok(Some((new_field, list_view)))
+}
+
+/// Reorders the struct values of a list or list-view column.
+///
+/// The element field keeps its name, declared nullability, and metadata; only its data type is
+/// replaced with the reordered struct.
+fn reorder_list_values(
+    values_field: Arc<ArrowField>,
+    values: Arc<dyn ArrowArray>,
+    children: &[ReorderIndex],
+) -> KernelResult<(Arc<ArrowField>, Arc<dyn ArrowArray>)> {
+    let Some(struct_array) = values.as_struct_opt() else {
+        return Err(KernelError::internal_error(
+            "Nested reorder of list should have had struct child.",
         ));
-        let list_view = Arc::new(GenericListViewArray::try_new(
-            new_values_field,
-            offsets,
-            sizes,
-            result_array,
-            null_buf,
-        )?);
-        // Take the field's type from the rebuilt array so a LargeListView isn't forced to ListView.
-        let new_field = Arc::new(ArrowField::new(
-            input_field_name,
-            list_view.data_type().clone(),
-            list_nullable,
-        ));
-        Ok(Some((new_field, list_view)))
-    } else {
-        Err(KernelError::internal_error(
-            "Nested reorder of list view should have had struct child.",
-        ))
-    }
+    };
+    let values = Arc::new(reorder_struct_array(
+        struct_array.clone(),
+        children,
+        None, /* Nested structures don't need row indexes since metadata columns can't be nested */
+        None, // No file_location passed since metadata columns can't be nested
+    )?);
+    let new_values_field = Arc::new(
+        values_field
+            .as_ref()
+            .clone()
+            .with_data_type(values.data_type().clone()),
+    );
+    Ok((new_values_field, values))
 }
 
 fn reorder_map(
@@ -3777,19 +3770,20 @@ mod tests {
         assert_eq!(present.as_struct().column_names(), vec!["c", "b"]);
     }
 
-    // Reorder must preserve the physical ListView/LargeListView wrapper.
+    // Reorder must preserve the physical ListView/LargeListView wrapper and the element field's
+    // declared nullability and metadata.
     #[rstest]
     #[case::list_view(false)]
     #[case::large_list_view(true)]
     fn reorder_list_view_of_struct(#[case] large_list_view: bool) {
         if large_list_view {
-            reorder_list_view_of_struct_case::<i64>(large_list_view);
+            reorder_list_view_of_struct_case::<i64>();
         } else {
-            reorder_list_view_of_struct_case::<i32>(large_list_view);
+            reorder_list_view_of_struct_case::<i32>();
         }
     }
 
-    fn reorder_list_view_of_struct_case<O: OffsetSizeTrait>(large_list_view: bool) {
+    fn reorder_list_view_of_struct_case<O: OffsetSizeTrait>() {
         let boolean = Arc::new(BooleanArray::from(vec![false, true, false])) as ArrowArrayRef;
         let int = Arc::new(Int32Array::from(vec![42, 28, 19])) as ArrowArrayRef;
         let values = StructArray::from(vec![
@@ -3815,7 +3809,12 @@ mod tests {
             O::from_usize(1).unwrap(),
         ]);
         let nulls = NullBuffer::from(vec![true, false, true]);
-        let item_field = Arc::new(ArrowField::new("item", values.data_type().clone(), false));
+        // The element field is declared nullable and carries metadata, but no element is null.
+        // Reorder must preserve both rather than inferring them from the data.
+        let item_field = Arc::new(
+            ArrowField::new("item", values.data_type().clone(), true)
+                .with_metadata([("custom".to_string(), "metadata".to_string())]),
+        );
         let list_view = Arc::new(
             GenericListViewArray::<O>::try_new(
                 item_field,
@@ -3842,21 +3841,37 @@ mod tests {
         assert!(!ordered_list_view.is_null(0));
         assert!(ordered_list_view.is_null(1));
         assert!(!ordered_list_view.is_null(2));
-        if large_list_view {
-            assert!(matches!(
+        assert_eq!(
+            matches!(
                 ordered.fields()[0].data_type(),
-                ArrowDataType::LargeListView(f) if !f.is_nullable()
-            ));
-        } else {
-            assert!(matches!(
-                ordered.fields()[0].data_type(),
-                ArrowDataType::ListView(f) if !f.is_nullable()
-            ));
-        }
-        let present = ordered_list_view.value(0);
-        assert_eq!(present.len(), 2);
-        assert_eq!(present.as_struct().column_names(), vec!["c", "b"]);
-        assert_eq!(ordered_list_view.value(2).len(), 1);
+                ArrowDataType::LargeListView(_)
+            ),
+            O::IS_LARGE
+        );
+        let element_field = match ordered.fields()[0].data_type() {
+            ArrowDataType::ListView(f) | ArrowDataType::LargeListView(f) => f,
+            other => panic!("expected a list view field, got {other:?}"),
+        };
+        assert_eq!(element_field.name(), "item");
+        assert!(element_field.is_nullable());
+        assert_eq!(
+            element_field.metadata().get("custom").map(String::as_str),
+            Some("metadata")
+        );
+
+        let first = ordered_list_view.value(0).as_struct().clone();
+        assert_eq!(first.column_names(), vec!["c", "b"]);
+        let c = first.column(0).as_primitive::<Int32Type>();
+        assert_eq!(c.len(), 2);
+        assert_eq!((c.value(0), c.value(1)), (28, 19));
+        let b = first.column(1).as_boolean();
+        assert_eq!(b.len(), 2);
+        assert_eq!((b.value(0), b.value(1)), (true, false));
+
+        let third = ordered_list_view.value(2).as_struct().clone();
+        let c = third.column(0).as_primitive::<Int32Type>();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c.value(0), 42);
     }
 
     #[test]
