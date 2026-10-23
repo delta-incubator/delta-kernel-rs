@@ -467,12 +467,12 @@ fn test_get_stat_values() {
 }
 
 #[rstest]
-#[case::greater_positive(Predicate::gt, 1_000_000, 2)]
-#[case::less_positive(Predicate::lt, 1_000_000, 3)]
-#[case::greater_negative(Predicate::gt, -1_000_000, 3)]
-#[case::less_negative(Predicate::lt, -1_000_000, 2)]
-#[case::equal_positive(Predicate::eq, 1_001_000, 1)]
-#[case::equal_negative(Predicate::eq, -1_001_000, 1)]
+#[case::greater_positive(Predicate::gt, 1_500_000, 2)]
+#[case::less_positive(Predicate::lt, 1_500_000, 5)]
+#[case::greater_negative(Predicate::gt, -1_500_000, 5)]
+#[case::less_negative(Predicate::lt, -1_500_000, 2)]
+#[case::equal_positive(Predicate::eq, 1_500_000, 2)]
+#[case::equal_negative(Predicate::eq, -1_500_000, 2)]
 fn timestamp_row_group_skipping_rescales_footer_units(
     #[case] comparison: fn(Expression, Expression) -> Predicate,
     #[case] bound: i64,
@@ -497,7 +497,12 @@ fn timestamp_row_group_skipping_rescales_footer_units(
     } else {
         &["ts"]
     };
-    let bytes = write_timestamp_parquet(unit, timezone, col_path, &values);
+    let bytes = write_timestamp_parquet(
+        unit,
+        timezone,
+        col_path,
+        &[&values[..2], &values[2..3], &values[3..]],
+    );
     let bound = if timezone.is_some() {
         Scalar::Timestamp(bound)
     } else {
@@ -532,22 +537,30 @@ fn timestamp_row_group_skipping_rescales_footer_units(
 #[rstest]
 #[case::millis(
     ArrowTimeUnit::Millisecond,
-    1_580_544_550_000,
-    Some(1_580_544_550_000_000)
+    &[1_580_544_550_000],
+    [Some(1_580_544_550_000_000); 2]
 )]
-#[case::negative_millis(ArrowTimeUnit::Millisecond, -1, Some(-1_000))]
-#[case::millis_overflow(ArrowTimeUnit::Millisecond, i64::MAX / 1_000 + 1, None)]
-#[case::millis_underflow(ArrowTimeUnit::Millisecond, i64::MIN / 1_000 - 1, None)]
-#[case::micros_max(ArrowTimeUnit::Microsecond, i64::MAX, Some(i64::MAX))]
-#[case::micros_min(ArrowTimeUnit::Microsecond, i64::MIN, Some(i64::MIN))]
-#[case::nanos(ArrowTimeUnit::Nanosecond, 1_999, Some(1))]
-#[case::negative_nanos(ArrowTimeUnit::Nanosecond, -1_999, Some(-1))]
-#[case::sub_microsecond(ArrowTimeUnit::Nanosecond, 999, Some(0))]
-#[case::negative_sub_microsecond(ArrowTimeUnit::Nanosecond, -999, Some(0))]
+#[case::negative_millis(ArrowTimeUnit::Millisecond, &[-1], [Some(-1_000); 2])]
+#[case::millis_overflow(
+    ArrowTimeUnit::Millisecond,
+    &[-1, i64::MAX / 1_000 + 1],
+    [Some(-1_000), None]
+)]
+#[case::millis_underflow(
+    ArrowTimeUnit::Millisecond,
+    &[i64::MIN / 1_000 - 1, 1],
+    [None, Some(1_000)]
+)]
+#[case::micros_max(ArrowTimeUnit::Microsecond, &[i64::MAX], [Some(i64::MAX); 2])]
+#[case::micros_min(ArrowTimeUnit::Microsecond, &[i64::MIN], [Some(i64::MIN); 2])]
+#[case::nanos(ArrowTimeUnit::Nanosecond, &[1_999], [Some(1); 2])]
+#[case::negative_nanos(ArrowTimeUnit::Nanosecond, &[-1_999], [Some(-1); 2])]
+#[case::sub_microsecond(ArrowTimeUnit::Nanosecond, &[999], [Some(0); 2])]
+#[case::negative_sub_microsecond(ArrowTimeUnit::Nanosecond, &[-999], [Some(0); 2])]
 fn timestamp_footer_stats_match_engine_casts(
     #[case] unit: ArrowTimeUnit,
-    #[case] raw: i64,
-    #[case] expected: Option<i64>,
+    #[case] raw: &[i64],
+    #[case] expected: [Option<i64>; 2],
     #[values(None, Some("UTC"))] timezone: Option<&str>,
 ) {
     let bytes = write_timestamp_parquet(unit, timezone, &["ts"], &[raw]);
@@ -559,23 +572,25 @@ fn timestamp_footer_stats_match_engine_casts(
     } else {
         DataType::TIMESTAMP_NTZ
     };
-    let expected_scalar = expected.map(|value| {
-        if timezone.is_some() {
-            Scalar::Timestamp(value)
-        } else {
-            Scalar::TimestampNtz(value)
-        }
+    let expected_scalar = expected.map(|stat| {
+        stat.map(|value| {
+            if timezone.is_some() {
+                Scalar::Timestamp(value)
+            } else {
+                Scalar::TimestampNtz(value)
+            }
+        })
     });
     assert_eq!(
         filter.get_min_stat(&column_name!("ts"), &data_type),
-        expected_scalar
+        expected_scalar[0]
     );
     assert_eq!(
         filter.get_max_stat(&column_name!("ts"), &data_type),
-        expected_scalar
+        expected_scalar[1]
     );
 
-    if expected.is_none() {
+    if expected.contains(&None) {
         let bound = if timezone.is_some() {
             Scalar::Timestamp(0)
         } else {
@@ -589,6 +604,14 @@ fn timestamp_footer_stats_match_engine_casts(
                 &comparison(col!("ts"), lit(bound.clone())),
             ));
         }
+        for (comparison, bound) in comparisons[..2].iter().zip(expected_scalar) {
+            if let Some(bound) = bound {
+                assert!(!RowGroupFilter::apply(
+                    builder.metadata().row_group(0),
+                    &comparison(col!("ts"), lit(bound)),
+                ));
+            }
+        }
     } else {
         let batch = builder.build().unwrap().next().unwrap().unwrap();
         let micros_type =
@@ -596,7 +619,7 @@ fn timestamp_footer_stats_match_engine_casts(
         let micros = cast(batch.column(0), &micros_type).unwrap();
         let values = cast(&micros, &ArrowDataType::Int64).unwrap();
         let values = values.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(Some(values.value(0)), expected);
+        assert_eq!(Some(values.value(0)), expected[0]);
     }
 }
 
@@ -659,7 +682,7 @@ fn timestamp_checkpoint_stats_rescale_before_widening(
         unit,
         timezone,
         &["add", "stats_parsed", stat, "ts"],
-        &[value],
+        &[&[value]],
     );
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
     let predicate = column_pred!("ts");
@@ -691,18 +714,19 @@ fn write_timestamp_parquet(
     unit: ArrowTimeUnit,
     timezone: Option<&str>,
     col_path: &[&str],
-    values: &[i64],
+    row_groups: &[&[i64]],
 ) -> Bytes {
     let data_type = ArrowDataType::Timestamp(unit, timezone.map(Into::into));
     let mut writer = None;
-    for &value in values {
-        let array = cast(&Int64Array::from(vec![value]), &data_type).unwrap();
+    for &values in row_groups {
+        let array = cast(&Int64Array::from(values.to_vec()), &data_type).unwrap();
         let (field, array) = wrap_in_nested_struct(col_path, array);
         let schema = Arc::new(ArrowSchema::new(vec![field]));
         let batch = RecordBatch::try_new(schema.clone(), vec![array]).unwrap();
         let writer =
             writer.get_or_insert_with(|| ArrowWriter::try_new(Vec::new(), schema, None).unwrap());
         writer.write(&batch).unwrap();
+        // Flush each supplied group so the tests control its footer bounds.
         writer.flush().unwrap();
     }
     writer.unwrap().into_inner().unwrap().into()

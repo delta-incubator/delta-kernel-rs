@@ -308,8 +308,12 @@ fn timestamp_from_date(days: Option<&i32>) -> Option<Scalar> {
     Some(Scalar::TimestampNtz(timestamp.num_microseconds()?))
 }
 
-/// Rescales footer timestamps to match the engine's microsecond timestamp casts. Unannotated
-/// INT64 columns retain the microsecond interpretation used for external checkpoints.
+/// Rescales footer timestamps to microseconds. Unannotated INT64 columns retain the microsecond
+/// interpretation used for external checkpoints.
+///
+/// Returns `None` on scaling overflow, so that bound cannot justify skipping a row group.
+/// Nanosecond values truncate toward zero to match the post-read cast to microseconds. Pruning
+/// requires readers to apply the same cast.
 fn timestamp_stat_as_micros(value: i64, column: &ColumnDescriptor) -> Option<i64> {
     let unit = match column.logical_type_ref() {
         Some(LogicalType::Timestamp(timestamp)) => Some(&timestamp.unit),
@@ -318,7 +322,6 @@ fn timestamp_stat_as_micros(value: i64, column: &ColumnDescriptor) -> Option<i64
     match unit {
         Some(TimeUnit::MILLIS) => value.checked_mul(1_000),
         Some(TimeUnit::MICROS) => Some(value),
-        // Arrow casts discard sub-microsecond precision, including for negative timestamps.
         Some(TimeUnit::NANOS) => Some(value / 1_000),
         None => match column.converted_type() {
             ConvertedType::TIMESTAMP_MILLIS => value.checked_mul(1_000),
