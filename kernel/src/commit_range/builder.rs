@@ -228,19 +228,19 @@ mod tests {
     use crate::engine::sync::SyncEngine;
     use crate::engine::test_delegating::DelegatingEngine;
     use crate::utils::FoldWithOption as _;
-    use crate::{Engine, FileMeta, KernelResultIteratorStatic, LogPath, Snapshot, StorageHandler};
+    use crate::{Engine, FileMeta, KernelResultIterator, LogPath, Snapshot, StorageHandler};
 
     struct NoIoStorageHandler;
 
     impl StorageHandler for NoIoStorageHandler {
-        fn list_from(&self, _path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
+        fn list_from(&self, _path: &Url) -> KernelResult<Box<dyn KernelResultIterator<FileMeta>>> {
             panic!("snapshot-based commit ranges must not list storage");
         }
 
         fn read_files(
             &self,
             _files: Vec<crate::FileSlice>,
-        ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
+        ) -> KernelResult<Box<dyn KernelResultIterator<bytes::Bytes>>> {
             panic!("commit range construction must not read files");
         }
 

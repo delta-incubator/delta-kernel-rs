@@ -41,7 +41,7 @@ use crate::schema::{
 };
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::utils::require;
-use crate::{EngineData, KernelError, KernelResult};
+use crate::{EngineData, KernelError, KernelResult, KernelResultIterator};
 
 macro_rules! prim_array_cmp {
     ( $left_arr: ident, $right_arr: ident, $(($data_ty: pat, $prim_ty: ty)),+ ) => {
@@ -1409,7 +1409,14 @@ fn safe_cast_back(decoded: RecordBatch, target: &ArrowSchemaRef) -> KernelResult
 /// [`MAP_ROOT_DEFAULT`]: crate::engine::arrow_conversion::MAP_ROOT_DEFAULT
 /// [`LIST_ARRAY_ROOT`]: crate::engine::arrow_conversion::LIST_ARRAY_ROOT
 /// [`arrow_conversion`]: crate::engine::arrow_conversion
-#[cfg(test)]
+#[cfg(any(
+    test,
+    all(
+        feature = "test-utils",
+        feature = "declarative-plans",
+        feature = "default-engine-base"
+    )
+))]
 pub(crate) fn coerce_columns_to_schema(
     columns: Vec<ArrowArrayRef>,
     target: &ArrowSchemaRef,
@@ -1539,7 +1546,7 @@ impl Encoder for NullMapPlaceholderEncoder {
 // TODO (zach): this should stream data to the JSON writer and output an iterator.
 #[internal_api]
 pub(crate) fn to_json_bytes(
-    data: impl Iterator<Item = KernelResult<FilteredEngineData>> + Send,
+    data: impl KernelResultIterator<FilteredEngineData>,
 ) -> KernelResult<Vec<u8>> {
     let builder = WriterBuilder::new().with_encoder_factory(Arc::new(NullValueMapEncoderFactory));
     let mut writer = builder.build::<_, LineDelimited>(Vec::new());

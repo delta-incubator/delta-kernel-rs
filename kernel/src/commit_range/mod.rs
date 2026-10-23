@@ -64,7 +64,7 @@ use crate::schema::{ArrayType, MapType, SchemaRef, StructField, StructType};
 use crate::snapshot::SnapshotRef;
 use crate::table_features::Operation;
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{Engine, KernelError, KernelResult, Version};
+use crate::{Engine, KernelError, KernelResult, KernelResultIterator, Version};
 
 /// A contiguous range of Delta commits, holding resolved `[start_version, end_version]` bounds
 /// plus the materialized commit-file pointers in `commit_files`.
@@ -133,7 +133,7 @@ impl CommitRange {
         engine: Arc<dyn Engine>,
         start_snapshot: Option<SnapshotRef>,
         actions: &[DeltaAction],
-    ) -> KernelResult<impl Iterator<Item = KernelResult<CommitAction>> + Send> {
+    ) -> KernelResult<impl KernelResultIterator<CommitAction>> {
         if actions.is_empty() {
             return Err(KernelError::generic(
                 "at least one DeltaAction must be requested",
@@ -232,11 +232,10 @@ impl CommitActionsIterator {
     }
 }
 
-/// Prepend `commit v={version}` context to `err`, preserving the original variant for the two
-/// kernel error kinds that protocol validation surfaces ([`KernelError::Unsupported`] and
-/// [`KernelError::InvalidProtocol`]). Other variants fall back to [`KernelError::generic`].
+/// Adds commit-version context while preserving protocol error kinds and typed cancellation.
 fn with_version_context(version: Version, err: KernelError) -> KernelError {
     match err {
+        KernelError::Cancelled => KernelError::Cancelled,
         KernelError::Unsupported(msg) => {
             KernelError::Unsupported(format!("commit v={version}: {msg}"))
         }
@@ -328,8 +327,10 @@ mod tests {
     use crate::arrow::array::{Array, AsArray, MapArray, StringArray, StructArray};
     use crate::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
     use crate::engine::sync::SyncEngine;
+    use crate::engine::CancellableEngine;
     use crate::engine_data::RowVisitor;
     use crate::object_store::memory::InMemory;
+    use crate::unit_test_utils::TestCancellationToken;
     use crate::Snapshot;
 
     /// Open a `CommitRange` over `table-with-dv-small` with a matching anchor snapshot.
@@ -375,6 +376,25 @@ mod tests {
                 files[i].location.last_modified,
                 "commit {i} timestamp must match file last_modified",
             );
+        }
+    }
+
+    #[rstest::rstest]
+    fn commit_header_read_preserves_cancellation(#[values(false, true)] cancelled: bool) {
+        let (range, engine, snapshot) = open_test_range_at(0);
+        let token = Arc::new(TestCancellationToken::default());
+        let engine = Arc::new(CancellableEngine::new(engine.as_ref(), token.clone()));
+        let mut commits = range
+            .commits(engine, Some(snapshot), &[DeltaAction::Add])
+            .unwrap();
+        if cancelled {
+            token.cancel();
+        }
+        let result = commits.next().unwrap();
+        if cancelled {
+            assert!(matches!(result, Err(KernelError::Cancelled)));
+        } else {
+            assert_eq!(result.unwrap().version(), 0);
         }
     }
 

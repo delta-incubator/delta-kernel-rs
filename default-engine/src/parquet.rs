@@ -32,7 +32,7 @@ use delta_kernel::schema::{SchemaRef, StructType};
 use delta_kernel::transaction::BoundWriteContext;
 use delta_kernel::{
     CancellationTokenRef, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
-    FoldWithOption as _, KernelError, KernelResult, KernelResultIteratorStatic, ParquetFooter,
+    FoldWithOption as _, KernelError, KernelResult, KernelResultIterator, ParquetFooter,
     ParquetHandler, PredicateRef,
 };
 use futures::stream::{self, BoxStream};
@@ -369,7 +369,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
     fn write_parquet_file(
         &self,
         location: url::Url,
-        mut data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+        mut data: Box<dyn KernelResultIterator<Box<dyn EngineData>>>,
     ) -> KernelResult<FileSize> {
         let store = self.store.clone();
 
@@ -1209,7 +1209,7 @@ mod tests {
         ));
 
         // Create iterator with single batch
-        let data_iter: KernelResultIteratorStatic<Box<dyn EngineData>> =
+        let data_iter: Box<dyn KernelResultIterator<Box<dyn EngineData>>> =
             Box::new(std::iter::once(Ok(engine_data)));
 
         // Test writing through the trait method
@@ -1416,7 +1416,7 @@ mod tests {
         ));
 
         // Create iterator with single batch
-        let data_iter: KernelResultIteratorStatic<Box<dyn EngineData>> =
+        let data_iter: Box<dyn KernelResultIterator<Box<dyn EngineData>>> =
             Box::new(std::iter::once(Ok(engine_data)));
 
         // Write the data
@@ -1807,7 +1807,7 @@ mod tests {
             )])
             .unwrap(),
         ));
-        let data_iter: KernelResultIteratorStatic<Box<dyn EngineData>> =
+        let data_iter: Box<dyn KernelResultIterator<Box<dyn EngineData>>> =
             Box::new(std::iter::once(Ok(engine_data)));
 
         // WHEN we write a parquet file to that path
