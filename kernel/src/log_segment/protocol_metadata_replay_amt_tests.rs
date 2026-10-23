@@ -21,6 +21,7 @@ use crate::engine::sync::SyncEngine;
 use crate::engine::test_delegating::DelegatingEngine;
 use crate::object_store::memory::InMemory;
 use crate::object_store::ObjectStoreExt as _;
+#[cfg(feature = "declarative-plans")]
 use crate::path::ParsedLogPath;
 #[cfg(feature = "declarative-plans")]
 use crate::plans::{Operation, PlanExecutor, PlanResult};
