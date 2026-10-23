@@ -23,8 +23,8 @@ use delta_kernel::transaction::{UpdateTableOperation, UpdateTableTransactionBuil
 use delta_kernel::LogPath;
 use delta_kernel::{
     Engine, EngineData, EvaluationHandler, FileDataReadResultIterator, FileMeta, FileSize,
-    FileStats, JsonHandler, KernelResult, KernelResultIterator, ParquetFooter, ParquetHandler,
-    PredicateRef, StorageHandler, Version,
+    FileStats, JsonHandler, KernelError, KernelResult, KernelResultIterator, ParquetFooter,
+    ParquetHandler, PredicateRef, StorageHandler, Version,
 };
 use rstest::rstest;
 use test_utils::delta_kernel_default_engine::executor::TaskExecutor;
@@ -648,9 +648,11 @@ async fn test_post_commit_crc_tracks_domain_metadata_changes() -> KernelResult<(
     Ok(())
 }
 
+#[rstest]
 #[tokio::test]
-async fn test_post_commit_crc_non_incremental_op_makes_file_stats_indeterminate() -> KernelResult<()>
-{
+async fn test_post_commit_crc_metadata_only_custom_op_makes_file_stats_indeterminate(
+    #[values("ANALYZE STATS", "VACUUM END", "SET TBLPROPERTIES")] operation: &str,
+) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
     // ===== GIVEN: Create table (v0) and insert data (v1) =====
@@ -663,11 +665,11 @@ async fn test_post_commit_crc_non_incremental_op_makes_file_stats_indeterminate(
         .unwrap_committed();
     let snapshot_v1 = committed.post_commit_snapshot().unwrap();
 
-    // ===== WHEN: Commit a non-incremental operation (ANALYZE STATS) =====
+    // ===== WHEN: Commit a custom operation without file actions =====
     let committed = begin_transaction_with(
         snapshot_v1.clone(),
         engine.as_ref(),
-        delta_kernel::transaction::UpdateTableOperation::Custom("ANALYZE STATS".to_string()),
+        UpdateTableOperation::Custom(operation.to_string()),
         "test-engine",
         true,
         |builder| builder,
@@ -680,6 +682,16 @@ async fn test_post_commit_crc_non_incremental_op_makes_file_stats_indeterminate(
     let snapshot_v2 = committed.post_commit_snapshot().unwrap();
     let crc_v2 = snapshot_v2.crc_at_version().unwrap();
     assert!(crc_v2.file_stats_state().is_indeterminate());
+    assert!(matches!(
+        snapshot_v2.write_checksum(engine.as_ref()),
+        Err(KernelError::ChecksumWriteUnsupported(_))
+    ));
+
+    let fresh = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
+    assert_eq!(
+        fresh.write_checksum(engine.as_ref())?.0,
+        ChecksumWriteResult::Written
+    );
 
     Ok(())
 }
