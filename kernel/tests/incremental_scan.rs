@@ -1216,10 +1216,11 @@ fn remove_action(path: &str) -> String {
     )
 }
 
-// Build a raw Add action with a partition value for the `val` partition column and no stats.
-fn add_partitioned(path: &str, val: &str) -> String {
+// Build a raw Add action with a partition value and no stats.
+fn add_partitioned(path: &str, partition_column: &str, partition_value: &str) -> String {
     format!(
-        "{{\"add\":{{\"path\":\"{path}\",\"partitionValues\":{{\"val\":\"{val}\"}},\"size\":100,\
+        "{{\"add\":{{\"path\":\"{path}\",\
+         \"partitionValues\":{{\"{partition_column}\":\"{partition_value}\"}},\"size\":100,\
          \"modificationTime\":1700000000000,\"dataChange\":true}}}}"
     )
 }
@@ -1435,7 +1436,7 @@ async fn incremental_scan_preserves_raw_partition_values_without_parsed_partitio
 async fn incremental_scan_partition_predicate_uses_timezone(
     #[case] predicate: Pred,
     #[case] timezone: Option<&str>,
-    #[case] expected: usize,
+    #[case] expected_file_num: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, target) = partitioned_snapshot(Partitioning::Timestamp).await?;
     let mut partition_values = PartitionValuesOptions::default();
@@ -1449,7 +1450,7 @@ async fn incremental_scan_partition_predicate_uses_timezone(
         .build(engine.as_ref())?
         .expect("expected an incremental scan stream")
         .into_listing()?;
-    assert_eq!(live_add_count(&listing), expected);
+    assert_eq!(live_add_count(&listing), expected_file_num);
     Ok(())
 }
 
@@ -1518,43 +1519,54 @@ async fn incremental_scan_ignores_invalid_timezone_without_partition_predicate(
 
 #[rstest]
 #[case::less_than(
-    col!("val").lt(lit(Scalar::Timestamp(
+    col!("ts").lt(lit(Scalar::Timestamp(
         1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
     ))),
-    &["base_before.parquet", "delta_before.parquet"],
+    &["base_before.parquet", "incremental_before.parquet"],
 )]
 #[case::less_than_or_equal(
-    col!("val").le(lit(Scalar::Timestamp(
+    col!("ts").le(lit(Scalar::Timestamp(
         1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
     ))),
-    &["base_before.parquet", "base_equal.parquet", "delta_before.parquet", "delta_equal.parquet"],
+    &[
+        "base_before.parquet",
+        "base_equal.parquet",
+        "incremental_before.parquet",
+        "incremental_equal.parquet",
+    ],
 )]
 #[case::equal(
-    col!("val").eq(lit(Scalar::Timestamp(
+    col!("ts").eq(lit(Scalar::Timestamp(
         1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
     ))),
-    &["base_equal.parquet", "delta_equal.parquet"],
+    &["base_equal.parquet", "incremental_equal.parquet"],
 )]
 #[case::greater_than_or_equal(
-    col!("val").ge(lit(Scalar::Timestamp(
+    col!("ts").ge(lit(Scalar::Timestamp(
         1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
     ))),
-    &["base_equal.parquet", "base_after.parquet", "delta_equal.parquet", "delta_after.parquet"],
+    &[
+        "base_equal.parquet",
+        "base_after.parquet",
+        "incremental_equal.parquet",
+        "incremental_after.parquet",
+    ],
 )]
 #[case::greater_than(
-    col!("val").gt(lit(Scalar::Timestamp(
+    col!("ts").gt(lit(Scalar::Timestamp(
         1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
     ))),
-    &["base_after.parquet", "delta_after.parquet"],
+    &["base_after.parquet", "incremental_after.parquet"],
 )]
 #[tokio::test]
 async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
     #[case] predicate: Pred,
     #[case] expected_paths: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // === Given a timestamp-partitioned table, a v1 base, and incremental changes in (v1, v3] ===
     let (storage, engine, table_url) = setup_test();
     let schema = schema_ref! {
-        nullable "val": TIMESTAMP,
+        nullable "ts": TIMESTAMP,
         nullable "value": INTEGER,
     };
     create_table(
@@ -1563,12 +1575,11 @@ async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
         "Test/1.0",
         true, /* data_change */
     )
-    .with_data_layout(DataLayout::partitioned(["val"]))
+    .with_data_layout(DataLayout::partitioned(["ts"]))
     .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
     .commit(engine.as_ref())?
     .unwrap_committed();
 
-    // Raw actions preserve offset-less values; Kernel's writer emits explicit offsets.
     let before = "2024-01-15 11:30:45.123456";
     let equal = "2024-01-15 12:30:45.123456";
     let after = "2024-01-15 13:30:45.123456";
@@ -1577,10 +1588,10 @@ async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
         storage.as_ref(),
         1, /* version */
         [
-            add_partitioned("base_before.parquet", before),
-            add_partitioned("base_equal.parquet", equal),
-            add_partitioned("base_after.parquet", after),
-            add_partitioned("base_removed.parquet", equal),
+            add_partitioned("base_before.parquet", "ts", before),
+            add_partitioned("base_equal.parquet", "ts", equal),
+            add_partitioned("base_after.parquet", "ts", after),
+            add_partitioned("base_removed.parquet", "ts", equal),
         ]
         .join("\n"),
     )
@@ -1589,15 +1600,14 @@ async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
         .at_version(1 /* version */)
         .build(engine.as_ref())?;
     let predicate = Arc::new(predicate);
-    let partition_values =
+    let partition_values_options =
         PartitionValuesOptions::default().with_timestamp_timezone("America/Los_Angeles");
-    let mut reconciled = full_scan_surviving_paths(
+    let mut base_file_list = full_scan_surviving_paths(
         base.clone(),
         engine.as_ref(),
         predicate.clone(),
-        partition_values.clone(),
+        partition_values_options.clone(),
     )?;
-    assert!(!reconciled.is_empty());
 
     add_commit(
         table_url.as_str(),
@@ -1605,9 +1615,9 @@ async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
         2, /* version */
         [
             remove_action("base_removed.parquet"),
-            add_partitioned("delta_before.parquet", before),
-            add_partitioned("delta_equal.parquet", equal),
-            add_partitioned("temporary.parquet", after),
+            add_partitioned("incremental_before.parquet", "ts", before),
+            add_partitioned("incremental_equal.parquet", "ts", equal),
+            add_partitioned("temporary.parquet", "ts", after),
         ]
         .join("\n"),
     )
@@ -1618,47 +1628,55 @@ async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
         3, /* version */
         [
             remove_action("temporary.parquet"),
-            add_partitioned("delta_after.parquet", after),
+            add_partitioned("incremental_after.parquet", "ts", after),
         ]
         .join("\n"),
     )
     .await?;
 
-    let target = Snapshot::builder_from(base.clone()).build(engine.as_ref())?;
-    assert_eq!(target.version(), 3);
-    let cold_target = Snapshot::builder_for(table_url.as_str())
-        .at_version(target.version())
+    let incrementally_built_target = Snapshot::builder_from(base.clone()).build(engine.as_ref())?;
+    assert_eq!(incrementally_built_target.version(), 3);
+    let freshly_built_target = Snapshot::builder_for(table_url.as_str())
+        .at_version(incrementally_built_target.version())
         .build(engine.as_ref())?;
-    let cold_paths = full_scan_surviving_paths(
-        cold_target,
+
+    // === When full and incremental scans use the same predicate and timezone ===
+    let full_scan_surviving_paths = full_scan_surviving_paths(
+        freshly_built_target,
         engine.as_ref(),
         predicate.clone(),
-        partition_values.clone(),
+        partition_values_options.clone(),
     )?;
-    let listing = unwrap_listing(
-        target
+    let incremental_list = unwrap_listing(
+        incrementally_built_target
             .incremental_scan_builder(base.version())
             .with_predicate(predicate)
-            .with_partition_values(partition_values)
+            .with_partition_values(partition_values_options)
             .build(engine.as_ref())?,
     );
+
+    // === Expect base files minus removes plus incremental adds to match the full scan ===
+    assert!(!base_file_list.is_empty());
     assert_eq!(
-        listing.summary.removes,
+        incremental_list.summary.removes,
         HashSet::from([key("base_removed.parquet"), key("temporary.parquet")])
     );
-    assert!(!listing.summary.live_adds.is_empty());
-    assert_eq!(live_add_count(&listing), listing.summary.live_adds.len());
-    reconciled.retain(|path| !listing.summary.removes.contains(&key(path)));
-    reconciled.extend(
-        listing
+    assert!(!incremental_list.summary.live_adds.is_empty());
+    assert_eq!(
+        live_add_count(&incremental_list),
+        incremental_list.summary.live_adds.len()
+    );
+    base_file_list.retain(|path| !incremental_list.summary.removes.contains(&key(path)));
+    base_file_list.extend(
+        incremental_list
             .summary
             .live_adds
             .iter()
             .map(|file| file.path().to_string()),
     );
     let expected: HashSet<_> = expected_paths.iter().map(|path| path.to_string()).collect();
-    assert_eq!(reconciled, expected);
-    assert_eq!(reconciled, cold_paths);
+    assert_eq!(base_file_list, expected);
+    assert_eq!(base_file_list, full_scan_surviving_paths);
     Ok(())
 }
 
@@ -2085,8 +2103,8 @@ async fn partition_column_predicate_prunes_added_files() -> Result<(), Box<dyn s
     )
     .await?;
     let v1 = [
-        add_partitioned("a.parquet", "x"),
-        add_partitioned("b.parquet", "y"),
+        add_partitioned("a.parquet", "val", "x"),
+        add_partitioned("b.parquet", "val", "y"),
     ]
     .join("\n");
     add_commit(table_root, storage.as_ref(), 1, v1).await?;
@@ -2330,7 +2348,7 @@ fn full_scan_surviving_paths(
     snapshot: SnapshotRef,
     engine: &dyn Engine,
     predicate: PredicateRef,
-    partition_values: PartitionValuesOptions,
+    partition_values_options: PartitionValuesOptions,
 ) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
     fn insert_path(paths: &mut HashSet<String>, scan_file: ScanFile) {
         paths.insert(scan_file.path);
@@ -2339,7 +2357,7 @@ fn full_scan_surviving_paths(
     let scan = snapshot
         .scan_builder()
         .with_predicate(predicate)
-        .with_partition_values(partition_values)
+        .with_partition_values(partition_values_options)
         .build()?;
     let mut paths: HashSet<String> = HashSet::new();
     for sm in scan.scan_metadata(engine)? {

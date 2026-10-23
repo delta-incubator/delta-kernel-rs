@@ -358,11 +358,11 @@ impl PartitionValuesOptions {
         Self::default()
     }
 
-    /// When this is called, the read output gains a
-    /// `partitionValues_parsed` struct column with one typed nullable field per partition column
-    /// (physical names, table partition-column order). On non-partitioned tables the column is
-    /// omitted. Values come directly from the checkpoint's native `partitionValues_parsed` column
-    /// when present, otherwise from parsing the string map.
+    /// When this is called, the read output gains a `partitionValues_parsed` struct column with one
+    /// typed nullable field per partition column (physical names, table partition-column order).
+    /// On non-partitioned tables the column is omitted. Values come directly from the checkpoint's
+    /// native `partitionValues_parsed` column when present and compatible, otherwise from parsing
+    /// the string map.
     pub fn with_struct() -> Self {
         Self {
             parsed_struct: true,

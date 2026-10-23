@@ -97,9 +97,6 @@ impl IncrementalScanBuilder {
     /// baseRowId) should interpret each row against the protocol at that row's commit
     /// version, not naively against the target snapshot.
     ///
-    /// An unrecognized timestamp timezone causes an error when the stream evaluates a partition
-    /// expression, not when the scan is built.
-    ///
     /// # Errors
     /// - `Err` if `base_version >= target_snapshot.version()` (caller error).
     /// - [`KernelError::Unsupported`] if typed partition value output is requested.
