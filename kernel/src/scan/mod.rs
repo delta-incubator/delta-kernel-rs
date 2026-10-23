@@ -548,9 +548,12 @@ impl ScanBuilder {
 
     /// Configure partition value output for the scan. See [`PartitionValuesOptions`].
     ///
-    /// Defaults to [`PartitionValuesOptions::default`] (string map only). Engines that
-    /// consume `partitionValues_parsed` directly should pass
-    /// [`PartitionValuesOptions::with_struct`] to also emit the typed struct column.
+    /// Defaults to [`PartitionValuesOptions::default`] (string map only).
+    ///
+    /// If `with_struct` is requested for a partitioned table, `scan_files` includes
+    /// `partitionValues_parsed` as a top-level sibling of `fileConstantValues`. The raw
+    /// `fileConstantValues.partitionValues` map remains present. See
+    /// [`PartitionValuesOptions::with_struct`] for other output details.
     pub fn with_partition_values(
         mut self,
         partition_values_options: PartitionValuesOptions,
