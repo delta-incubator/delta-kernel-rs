@@ -5,27 +5,36 @@ use std::sync::Arc;
 
 use delta_kernel::actions::{MAX_VALUES, MIN_VALUES};
 use delta_kernel::arrow::array::{Array, Int64Array, StringArray, StructArray};
+use delta_kernel::arrow::compute::concat_batches;
+use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::committer::FileSystemCommitter;
-use delta_kernel::expressions::{column_name, ColumnName};
+use delta_kernel::engine::arrow_data::ArrowEngineData;
+use delta_kernel::expressions::{column_name, ArrayData, ColumnName, MapData, Scalar};
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::object_store::DynObjectStore;
-use delta_kernel::schema::StructType;
+use delta_kernel::schema::{ArrayType, DataType, MapType, StructField, StructType};
 use delta_kernel::table_features::{get_any_level_column_physical_name, ColumnMappingMode};
 use delta_kernel::transaction::create_table::create_table as create_table_txn;
-use delta_kernel::Snapshot;
+use delta_kernel::transaction::data_layout::DataLayout;
+use delta_kernel::transaction::{Transaction, UpdateTableOperation};
+use delta_kernel::{EngineData as _, Snapshot};
 use itertools::Itertools;
+use serde_json::{json, Value};
 use tempfile::TempDir;
-use test_utils::delta_kernel_default_engine::executor::tokio::TokioMultiThreadExecutor;
+use test_utils::delta_kernel_default_engine::executor::tokio::{
+    TokioBackgroundExecutor, TokioMultiThreadExecutor,
+};
 use test_utils::delta_kernel_default_engine::DefaultEngine;
 use test_utils::{
-    create_default_engine_mt_executor, nested_batches, nested_schema, read_actions_from_commit,
-    test_table_setup, write_batch_to_table,
+    assert_result_error_with_message, create_default_engine_mt_executor, into_record_batch,
+    nested_batches, nested_schema, read_actions_from_commit, test_table_setup,
+    write_batch_to_table,
 };
 use url::Url;
 
 use crate::common::write_utils::{
-    assert_column_mapping_mode, assert_min_max_stats, resolve_json_path, resolve_struct_field,
-    set_table_properties,
+    assert_column_mapping_mode, assert_min_max_stats, get_simple_schema, resolve_json_path,
+    resolve_struct_field, set_table_properties, simple_id_batch,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -110,8 +119,6 @@ fn setup_clustered_table(
     clustering_cols: Vec<ColumnName>,
     table_properties: &[(&str, &str)],
 ) -> Result<ClusteredTableSetup, Box<dyn std::error::Error>> {
-    use delta_kernel::transaction::data_layout::DataLayout;
-
     let (_tmp_dir, table_path, _) = test_table_setup()?;
     let table_url = Url::from_directory_path(&table_path).unwrap();
     let engine = create_default_engine_mt_executor(&table_url)?;
@@ -342,5 +349,230 @@ async fn test_clustered_table_write_has_stats_parsed(
     assert_eq!(stats_rows[0], (1, 3, "st1".to_string(), "st3".to_string()));
     assert_eq!(stats_rows[1], (4, 6, "st4".to_string(), "st6".to_string()));
 
+    Ok(())
+}
+
+struct NewFilesSetup {
+    _tmp_dir: TempDir,
+    table_url: Url,
+    engine: Arc<DefaultEngine<TokioBackgroundExecutor>>,
+    txn: Transaction,
+    add_files_metadata: RecordBatch,
+}
+
+/// Creates a table clustered on `id`, then writes one data file per entry of `file_ids` in a write
+/// transaction built with the given add-file options. Returns the transaction with the files'
+/// add-file metadata concatenated into one batch, not yet added to the transaction.
+async fn write_new_files_to_clustered_table(
+    row_tracking: bool,
+    tags: bool,
+    clustering_provider: bool,
+    file_ids: Vec<Vec<i32>>,
+) -> Result<NewFilesSetup, Box<dyn std::error::Error>> {
+    let (_tmp_dir, table_path, engine) = test_table_setup()?;
+    let table_url = Url::from_directory_path(&table_path).unwrap();
+    let schema = get_simple_schema();
+    let table_properties: &[(&str, &str)] = if row_tracking {
+        &[("delta.enableRowTracking", "true")]
+    } else {
+        &[]
+    };
+    let snapshot = create_table_txn(table_url.as_str(), schema.clone(), "Test/1.0", true)
+        .with_table_properties(table_properties.iter().copied())
+        .with_data_layout(DataLayout::Clustered {
+            columns: vec![column_name!("id")],
+        })
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+
+    let mut builder = snapshot.update_table(UpdateTableOperation::Write, "Test/1.0", true);
+    if tags {
+        builder = builder.with_add_file_tags();
+    }
+    if clustering_provider {
+        builder = builder.with_add_file_clustering_provider();
+    }
+    let txn = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+    let write_state = txn.write_state()?;
+    let write_context = write_state.write_context_builder().build()?;
+    let mut file_metadata = Vec::new();
+    for ids in file_ids {
+        let data = ArrowEngineData::new(simple_id_batch(&schema, ids));
+        let metadata = engine.write_parquet(&data, &write_context).await?;
+        file_metadata.push(into_record_batch(metadata));
+    }
+    let add_files_metadata = concat_batches(&file_metadata[0].schema(), &file_metadata)?;
+    Ok(NewFilesSetup {
+        _tmp_dir,
+        table_url,
+        engine,
+        txn,
+        add_files_metadata,
+    })
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn test_add_file_tags_and_clustering_provider_written_to_add_actions(
+    #[values(false, true)] row_tracking: bool,
+    #[values(false, true)] tags: bool,
+    #[values(false, true)] clustering_provider: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let NewFilesSetup {
+        _tmp_dir,
+        table_url,
+        engine,
+        mut txn,
+        add_files_metadata,
+    } = write_new_files_to_clustered_table(
+        row_tracking,
+        tags,
+        clustering_provider,
+        vec![vec![1, 2], vec![3], vec![4]],
+    )
+    .await?;
+
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    if tags {
+        let tags_type = MapType::new(DataType::STRING, DataType::STRING, true);
+        fields.push(StructField::nullable("tags", tags_type.clone()));
+        columns.push(ArrayData::try_new(
+            ArrayType::new(tags_type.clone(), true),
+            [
+                Scalar::Map(MapData::try_new(
+                    tags_type.clone(),
+                    [("a", Scalar::from("1")), ("b", Scalar::from("2"))],
+                )?),
+                Scalar::Map(MapData::try_new(
+                    tags_type.clone(),
+                    [("a", Scalar::Null(DataType::STRING))],
+                )?),
+                Scalar::Null(tags_type.into()),
+            ],
+        )?);
+    }
+    if clustering_provider {
+        fields.push(StructField::nullable(
+            "clusteringProvider",
+            DataType::STRING,
+        ));
+        columns.push(ArrayData::try_new(
+            ArrayType::new(DataType::STRING, true),
+            [
+                Scalar::from("liquid"),
+                Scalar::Null(DataType::STRING),
+                Scalar::from("liquid"),
+            ],
+        )?);
+    }
+    let add_files_metadata = ArrowEngineData::new(add_files_metadata);
+    txn.add_files(if fields.is_empty() {
+        Box::new(add_files_metadata)
+    } else {
+        add_files_metadata.append_columns(Arc::new(StructType::try_new(fields)?), columns)?
+    });
+    let version = txn
+        .commit(engine.as_ref())?
+        .unwrap_committed()
+        .commit_version();
+
+    let adds = read_actions_from_commit(&table_url, version, "add")?;
+    let read_back = |name: &str| adds.iter().map(|add| add.get(name).cloned()).collect_vec();
+    let expected = |enabled: bool, values: [Option<Value>; 3]| {
+        if enabled {
+            values.to_vec()
+        } else {
+            vec![None; 3]
+        }
+    };
+    assert_eq!(
+        read_back("tags"),
+        expected(
+            tags,
+            [
+                Some(json!({"a": "1", "b": "2"})),
+                Some(json!({"a": null})),
+                None
+            ]
+        )
+    );
+    assert_eq!(
+        read_back("clusteringProvider"),
+        expected(
+            clustering_provider,
+            [Some(json!("liquid")), None, Some(json!("liquid"))]
+        )
+    );
+    for add in &adds {
+        assert_eq!(add["baseRowId"].is_i64(), row_tracking);
+    }
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::tags(true, false, "tags")]
+#[case::clustering_provider(false, true, "clusteringProvider")]
+#[case::both(true, true, "tags")]
+#[tokio::test]
+async fn test_add_files_without_opted_in_column_fails_at_commit(
+    #[values(false, true)] row_tracking: bool,
+    #[case] tags: bool,
+    #[case] clustering_provider: bool,
+    #[case] missing_column: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let NewFilesSetup {
+        _tmp_dir,
+        engine,
+        mut txn,
+        add_files_metadata,
+        ..
+    } = write_new_files_to_clustered_table(row_tracking, tags, clustering_provider, vec![vec![1]])
+        .await?;
+
+    txn.add_files(Box::new(ArrowEngineData::new(add_files_metadata)));
+    assert_result_error_with_message(
+        txn.commit(engine.as_ref()),
+        &format!("Expected schema field '{missing_column}' is missing"),
+    );
+    Ok(())
+}
+
+#[test]
+fn test_add_file_clustering_provider_rejected_on_unclustered_table(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_tmp_dir, table_path, engine) = test_table_setup()?;
+    let table_url = Url::from_directory_path(&table_path).unwrap();
+    let expected_error = "with_add_file_clustering_provider requires a table that supports the \
+                          'clustering' writer feature";
+
+    let create = || create_table_txn(table_url.as_str(), get_simple_schema(), "Test/1.0", true);
+    assert_result_error_with_message(
+        create()
+            .with_add_file_clustering_provider()
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new())),
+        expected_error,
+    );
+    let snapshot = create()
+        .with_add_file_tags()
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+
+    let update = || {
+        snapshot
+            .clone()
+            .update_table(UpdateTableOperation::Write, "Test/1.0", true)
+    };
+    assert_result_error_with_message(
+        update()
+            .with_add_file_clustering_provider()
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new())),
+        expected_error,
+    );
+    update()
+        .with_add_file_tags()
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     Ok(())
 }
