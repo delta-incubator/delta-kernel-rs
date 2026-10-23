@@ -1365,7 +1365,11 @@ mod test {
         MockProtocolBuilder::new()
             .with_writer_features([TableFeature::CheckConstraints])
             .build(),
-        WriteSupport::Unsupported
+        if cfg!(feature = "check-constraints-in-dev") {
+            WriteSupport::Supported
+        } else {
+            WriteSupport::Unsupported
+        }
     )]
     #[case::legacy_writer_below_min_version(
         &[("delta.constraints.positive", "amount > 0")],
@@ -1375,7 +1379,11 @@ mod test {
     #[case::legacy_writer_at_min_version(
         &[("delta.constraints.positive", "amount > 0")],
         MockProtocolBuilder::new().with_versions(1, 3).build(),
-        WriteSupport::Unsupported
+        if cfg!(feature = "check-constraints-in-dev") {
+            WriteSupport::Supported
+        } else {
+            WriteSupport::Unsupported
+        }
     )]
     // Unusual names, accepted only because other Delta writers can store and enforce them.
     #[case::bare_prefix(
@@ -1390,6 +1398,20 @@ mod test {
         ],
         MockProtocolBuilder::new().with_versions(1, 2).build(),
         WriteSupport::InvalidProtocol
+    )]
+    #[case::names_differing_only_in_case_with_feature(
+        &[
+            ("delta.constraints.positive", "amount > 0"),
+            ("delta.constraints.POSITIVE", "amount > 1"),
+        ],
+        MockProtocolBuilder::new()
+            .with_writer_features([TableFeature::CheckConstraints])
+            .build(),
+        if cfg!(feature = "check-constraints-in-dev") {
+            WriteSupport::Supported
+        } else {
+            WriteSupport::Unsupported
+        }
     )]
     // No CHECK constraint keys.
     #[case::no_properties(
@@ -1506,6 +1528,33 @@ mod test {
             .build();
         assert!(table_config.is_feature_supported(&TableFeature::DeletionVectors));
         assert!(table_config.is_feature_enabled(&TableFeature::DeletionVectors));
+    }
+
+    #[rstest]
+    #[case::no_constraint(&[])]
+    #[case::named_constraint(&[("delta.constraints.positive", "amount > 0")])]
+    #[case::non_lowercase_prefix(&[("DELTA.CONSTRAINTS.positive", "amount > 0")])]
+    #[case::bare_prefix_empty_name(&[("delta.constraints.", "1 > 0")])]
+    #[case::whitespace_only_name(&[("delta.constraints.   ", "1 > 0")])]
+    fn check_constraints_enabled_exactly_when_supported(
+        #[case] properties: &[(&str, &str)],
+        #[values(true, false)] feature_listed: bool,
+    ) {
+        let writer_features = if feature_listed {
+            vec![TableFeature::CheckConstraints]
+        } else {
+            vec![]
+        };
+        let table_config = MockTableConfigurationBuilder::new()
+            .with_properties(properties)
+            .with_protocol(
+                MockProtocolBuilder::new()
+                    .with_writer_features(writer_features)
+                    .build(),
+            )
+            .build();
+        let is_enabled = table_config.is_feature_enabled(&TableFeature::CheckConstraints);
+        assert_eq!(is_enabled, feature_listed);
     }
 
     #[rstest]
