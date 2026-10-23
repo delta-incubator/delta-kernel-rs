@@ -11,8 +11,7 @@ use crate::engine::test_delegating::DelegatingEngine;
 use crate::{
     CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
     FileSlice, FilteredEngineData, JsonHandler, KernelError, KernelResult, KernelResultIterator,
-    KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef, SchemaRef,
-    StorageHandler,
+    ParquetFooter, ParquetHandler, PredicateRef, SchemaRef, StorageHandler,
 };
 
 /// Read boundary observed by the recording handlers.
@@ -102,18 +101,18 @@ impl StorageHandler for RecordingReads {
     plain_reads! {
         /// Records an unscoped listing request.
         fn list_from, list_from_with_cancellation(path: &Url)
-            -> KernelResult<KernelResultIteratorStatic<FileMeta>>;
+            -> KernelResult<Box<dyn KernelResultIterator<FileMeta>>>;
 
         /// Records an unscoped byte-range read.
         fn read_files, read_files_with_cancellation(files: Vec<FileSlice>)
-            -> KernelResult<KernelResultIteratorStatic<Bytes>>;
+            -> KernelResult<Box<dyn KernelResultIterator<Bytes>>>;
     }
 
     fn list_from_with_cancellation(
         &self,
         path: &Url,
         token: Option<CancellationTokenRef>,
-    ) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
+    ) -> KernelResult<Box<dyn KernelResultIterator<FileMeta>>> {
         self.record(Read::List, &token)?;
         self.inner
             .storage_handler()
@@ -124,7 +123,7 @@ impl StorageHandler for RecordingReads {
         &self,
         files: Vec<FileSlice>,
         token: Option<CancellationTokenRef>,
-    ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
+    ) -> KernelResult<Box<dyn KernelResultIterator<Bytes>>> {
         let read = if files.iter().any(|(url, _)| url.path().ends_with(".crc")) {
             Read::Crc
         } else {
@@ -194,7 +193,7 @@ impl JsonHandler for RecordingReads {
     fn write_json_file(
         &self,
         path: &Url,
-        data: KernelResultIterator<'_, FilteredEngineData>,
+        data: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         overwrite: bool,
     ) -> KernelResult<FileSize> {
         self.inner
@@ -242,7 +241,7 @@ impl ParquetHandler for RecordingReads {
     fn write_parquet_file(
         &self,
         location: Url,
-        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+        data: Box<dyn KernelResultIterator<Box<dyn EngineData>>>,
     ) -> KernelResult<FileSize> {
         self.inner
             .parquet_handler()

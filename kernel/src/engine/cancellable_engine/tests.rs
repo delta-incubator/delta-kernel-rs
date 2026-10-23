@@ -27,7 +27,7 @@ use crate::unit_test_utils::{
 use crate::utils::try_parse_uri;
 use crate::{
     CancellationTokenRef, Engine, EngineData, FileMeta, FileSlice, FilteredEngineData, KernelError,
-    KernelResult, KernelResultIteratorStatic, Snapshot, StorageHandler,
+    KernelResult, KernelResultIterator, Snapshot, StorageHandler,
 };
 
 /// Handler entry point selected for a read.
@@ -43,7 +43,7 @@ fn start_read(
     read: Read,
     api: ReadApi,
     token: Option<CancellationTokenRef>,
-) -> KernelResult<KernelResultIteratorStatic<()>> {
+) -> KernelResult<Box<dyn KernelResultIterator<()>>> {
     let log = try_parse_uri("tests/data/parquet_row_group_skipping")?.join("_delta_log/")?;
     let file_name = match read {
         Read::List => "00000000000000000000",
@@ -123,8 +123,8 @@ fn start_read(
 
 /// Erases successful read values without consuming the iterator.
 fn discard_read_values<T: 'static>(
-    result: KernelResult<KernelResultIteratorStatic<T>>,
-) -> KernelResult<KernelResultIteratorStatic<()>> {
+    result: KernelResult<Box<dyn KernelResultIterator<T>>>,
+) -> KernelResult<Box<dyn KernelResultIterator<()>>> {
     Ok(Box::new(result?.map(|item| item.map(|_| ()))))
 }
 
@@ -381,8 +381,8 @@ struct RecordingCopy {
 
 impl StorageHandler for RecordingCopy {
     forward_methods! {
-        fn list_from(path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>>;
-        fn read_files(files: Vec<FileSlice>) -> KernelResult<KernelResultIteratorStatic<Bytes>>;
+        fn list_from(path: &Url) -> KernelResult<Box<dyn KernelResultIterator<FileMeta>>>;
+        fn read_files(files: Vec<FileSlice>) -> KernelResult<Box<dyn KernelResultIterator<Bytes>>>;
         fn put(path: &Url, data: Bytes, overwrite: bool) -> KernelResult<()>;
         fn head(path: &Url) -> KernelResult<FileMeta>;
         fn delete(path: &Url) -> KernelResult<()>;
