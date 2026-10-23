@@ -91,12 +91,7 @@ pub(crate) fn read_checkpoint_action(
                 log_root,
                 DOMAIN_METADATA_NAME,
                 LOG_DOMAIN_METADATA_SCHEMA.clone(),
-                checkpoint
-                    .domain_metadata
-                    .iter()
-                    .cloned()
-                    .map(Into::into)
-                    .collect(),
+                checkpoint.domain_metadata.iter().cloned(),
                 &checkpoint.domain_metadata_sidecars,
                 read_schema.clone(),
                 cancellation_token,
