@@ -23,23 +23,23 @@ use crate::schema::{ColumnNamesAndTypes, DataType};
 use crate::utils::require;
 use crate::{EngineData, KernelError, KernelResult};
 
-/// Tracks staged file actions across a transaction.
+/// Validates staged file-action (addFile, removeFile) uniqueness across a transaction.
 ///
 /// - AddFile paths must be unique, regardless of deletion vector ID.
 /// - RemoveFile paths must be unique, regardless of deletion vector ID.
 /// - An AddFile and RemoveFile cannot share the same `(path, dv_id)`, including when both IDs are
-///   absent. Different DV IDs on the same path are allowed for deletion-vector updates.
+///   `None` (no deletion vector). Different DV IDs on the same path are allowed for DV updates.
 ///
 /// Note that [`FileActionDeduplicator`](crate::log_replay::FileActionDeduplicator) uses different
 /// rules: it deduplicates `(path, dv_id)` pairs during log replay.
 // TODO(#3692): Optimize by using only one map.
 #[derive(Default)]
-pub(super) struct FileActionTracker {
+pub(super) struct FileActionUniquenessValidator {
     add_paths: HashMap<String, Option<String>>,
     remove_paths: HashMap<String, Option<String>>,
 }
 
-impl FileActionTracker {
+impl FileActionUniquenessValidator {
     fn record_add(&mut self, path: &str, dv_id: Option<String>) -> KernelResult<()> {
         Self::record(
             path,
@@ -100,8 +100,8 @@ pub(crate) trait Validation {
 ///
 /// Each instance uses one column projection and applies its configured validations to every staged
 /// row. Every [`Validation`] sees the full getter list and reads the columns it needs.
-/// The `'a` lifetime lets validations borrow shared state, such as [`FileActionTracker`], so all
-/// the checks can be run in one pass.
+/// The `'a` lifetime lets validations borrow shared state, such as
+/// [`FileActionUniquenessValidator`], so all the checks can be run in one pass.
 #[derive(Constructor)]
 struct StagedDataValidator<'a> {
     columns_and_types: &'static ColumnNamesAndTypes,
@@ -173,68 +173,132 @@ mod tests {
     #[rstest]
     #[case::duplicate_add_different_dv(
         &[
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "same_path", Some("dv-1")),
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "same_path", Some("dv-2")),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "same_path" /* path */,
+                Some("dv-1"),
+            ),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "same_path" /* path */,
+                Some("dv-2"),
+            ),
         ],
         Some("multiple AddFile actions"),
     )]
     #[case::duplicate_remove_different_dv(
         &[
-            FileActionTrackerTestCase::new(TestFileActionType::Remove, "same_path", Some("dv-1")),
-            FileActionTrackerTestCase::new(TestFileActionType::Remove, "same_path", Some("dv-2")),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Remove,
+                "same_path" /* path */,
+                Some("dv-1"),
+            ),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Remove,
+                "same_path" /* path */,
+                Some("dv-2"),
+            ),
         ],
         Some("multiple RemoveFile actions"),
     )]
     #[case::add_remove_same_dv(
         &[
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "same_path", Some("dv")),
-            FileActionTrackerTestCase::new(TestFileActionType::Remove, "same_path", Some("dv")),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "same_path" /* path */,
+                Some("dv"),
+            ),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Remove,
+                "same_path" /* path */,
+                Some("dv"),
+            ),
         ],
         Some("same deletion vector ID"),
     )]
     #[case::remove_add_same_dv(
         &[
-            FileActionTrackerTestCase::new(TestFileActionType::Remove, "same_path", None),
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "same_path", None),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Remove,
+                "same_path" /* path */,
+                None /* dv_id */,
+            ),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "same_path" /* path */,
+                None /* dv_id */,
+            ),
         ],
         Some("without a deletion vector"),
     )]
     #[case::remove_add_same_non_null_dv(
         &[
-            FileActionTrackerTestCase::new(TestFileActionType::Remove, "same_path", Some("dv")),
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "same_path", Some("dv")),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Remove,
+                "same_path" /* path */,
+                Some("dv"),
+            ),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "same_path" /* path */,
+                Some("dv"),
+            ),
         ],
         Some("same deletion vector ID"),
     )]
     #[case::remove_add_different_dv(
         &[
-            FileActionTrackerTestCase::new(TestFileActionType::Remove, "same_path", Some("dv-1")),
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "same_path", Some("dv-2")),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Remove,
+                "same_path" /* path */,
+                Some("dv-1"),
+            ),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "same_path" /* path */,
+                Some("dv-2"),
+            ),
         ],
         None,
     )]
     #[case::add_remove_different_dv(
         &[
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "same_path", Some("dv-1")),
-            FileActionTrackerTestCase::new(TestFileActionType::Remove, "same_path", Some("dv-2")),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "same_path" /* path */,
+                Some("dv-1"),
+            ),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Remove,
+                "same_path" /* path */,
+                Some("dv-2"),
+            ),
         ],
         None,
     )]
     #[case::same_dv_different_paths(
         &[
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "path_0", Some("dv")),
-            FileActionTrackerTestCase::new(TestFileActionType::Add, "path_1", Some("dv")),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "path_0" /* path */,
+                Some("dv"),
+            ),
+            FileActionUniquenessValidatorTestCase::new(
+                TestFileActionType::Add,
+                "path_1" /* path */,
+                Some("dv"),
+            ),
         ],
         None,
     )]
     fn file_action_combinations_accepted_or_rejected(
-        #[case] file_actions: &[FileActionTrackerTestCase],
+        #[case] file_actions: &[FileActionUniquenessValidatorTestCase],
         #[case] expected_error: Option<&str>,
     ) {
-        let mut tracker = FileActionTracker::default();
+        let mut uniqueness_validator = FileActionUniquenessValidator::default();
         let result = file_actions
             .iter()
-            .try_for_each(|file_action| file_action.record(&mut tracker));
+            .try_for_each(|file_action| file_action.record(&mut uniqueness_validator));
 
         if let Some(expected_error) = expected_error {
             assert!(matches!(
@@ -256,25 +320,25 @@ mod tests {
     impl TestFileActionType {
         fn record(
             self,
-            tracker: &mut FileActionTracker,
+            uniqueness_validator: &mut FileActionUniquenessValidator,
             path: &str,
             dv_id: Option<String>,
         ) -> KernelResult<()> {
             match self {
-                Self::Add => tracker.record_add(path, dv_id),
-                Self::Remove => tracker.record_remove(path, dv_id),
+                Self::Add => uniqueness_validator.record_add(path, dv_id),
+                Self::Remove => uniqueness_validator.record_remove(path, dv_id),
             }
         }
     }
 
     #[derive(Clone, Copy)]
-    struct FileActionTrackerTestCase {
+    struct FileActionUniquenessValidatorTestCase {
         action_type: TestFileActionType,
         path: &'static str,
         dv_id: Option<&'static str>,
     }
 
-    impl FileActionTrackerTestCase {
+    impl FileActionUniquenessValidatorTestCase {
         const fn new(
             action_type: TestFileActionType,
             path: &'static str,
@@ -287,9 +351,15 @@ mod tests {
             }
         }
 
-        fn record(self, tracker: &mut FileActionTracker) -> KernelResult<()> {
-            self.action_type
-                .record(tracker, self.path, self.dv_id.map(str::to_owned))
+        fn record(
+            self,
+            uniqueness_validator: &mut FileActionUniquenessValidator,
+        ) -> KernelResult<()> {
+            self.action_type.record(
+                uniqueness_validator,
+                self.path,
+                self.dv_id.map(str::to_owned),
+            )
         }
     }
 }

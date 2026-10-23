@@ -6,7 +6,7 @@ use super::utils::{
     columns_and_types_from_schema, dv_id_at, validate_required_field_exist, DELETION_VECTOR_NAME,
     OFFSET_NAME, PATH_OR_INLINE_DV_NAME, STORAGE_TYPE_NAME,
 };
-use super::{FileActionTracker, StagedDataValidator, Validation};
+use super::{FileActionUniquenessValidator, StagedDataValidator, Validation};
 use crate::engine_data::{FilteredEngineData, GetData, TypedGetData as _};
 use crate::expressions::column_name;
 use crate::scan::log_replay::{PATH_NAME, SIZE_NAME};
@@ -32,19 +32,19 @@ static REMOVE_FILE_COLUMNS_FOR_VALIDATION: LazyLock<KernelResult<ColumnNamesAndT
         columns_and_types_from_schema(&scan_row_schema(), names)
     });
 
-/// Runs required validations for every selected RemoveFile row. When `pre_staged_file_actions` is
-/// provided, also validates file-action (addFile, removeFile) uniqueness across
-/// `pre_staged_file_actions` and selected rows in `removes`.
+/// Runs mandatory validations for every selected RemoveFile row. When `uniqueness_validator` is
+/// provided, also checks and records each selected RemoveFile against the file actions (addFile,
+/// removeFile) already recorded in it.
 pub(crate) fn validate_remove_files(
     removes: &[FilteredEngineData],
-    pre_staged_file_actions: Option<&mut FileActionTracker>,
+    uniqueness_validator: Option<&mut FileActionUniquenessValidator>,
 ) -> KernelResult<()> {
-    StagedDataValidator::for_remove_files(pre_staged_file_actions)?.validate_selected_rows(removes)
+    StagedDataValidator::for_remove_files(uniqueness_validator)?.validate_selected_rows(removes)
 }
 
 impl<'a> StagedDataValidator<'a> {
     fn for_remove_files(
-        pre_staged_file_actions: Option<&'a mut FileActionTracker>,
+        uniqueness_validator: Option<&'a mut FileActionUniquenessValidator>,
     ) -> KernelResult<Self> {
         let columns = REMOVE_FILE_COLUMNS_FOR_VALIDATION
             .as_ref()
@@ -55,9 +55,9 @@ impl<'a> StagedDataValidator<'a> {
             })?;
         let mut validations: Vec<Box<dyn Validation + 'a>> =
             vec![Box::new(MandatoryRemoveFileValidation)];
-        if let Some(pre_staged_file_actions) = pre_staged_file_actions {
-            validations.push(Box::new(RepeatedFileActionValidation {
-                pre_staged_file_actions,
+        if let Some(uniqueness_validator) = uniqueness_validator {
+            validations.push(Box::new(RemoveFileUniquenessValidation {
+                uniqueness_validator,
             }));
         }
         Ok(StagedDataValidator::new(columns, validations))
@@ -100,11 +100,13 @@ impl Validation for MandatoryRemoveFileValidation {
     }
 }
 
-struct RepeatedFileActionValidation<'a> {
-    pre_staged_file_actions: &'a mut FileActionTracker,
+/// Validates selected RemoveFile uniqueness against file actions (addFile, removeFile) in the
+/// transaction.
+struct RemoveFileUniquenessValidation<'a> {
+    uniqueness_validator: &'a mut FileActionUniquenessValidator,
 }
 
-impl Validation for RepeatedFileActionValidation<'_> {
+impl Validation for RemoveFileUniquenessValidation<'_> {
     fn validate_row<'a>(
         &mut self,
         row: usize,
@@ -112,7 +114,7 @@ impl Validation for RepeatedFileActionValidation<'_> {
     ) -> KernelResult<()> {
         let path: &str = getters[PATH].get(row, PATH_NAME)?;
         let dv_id = dv_id_at(getters, DELETION_VECTOR_STORAGE_TYPE, row)?;
-        self.pre_staged_file_actions.record_remove(path, dv_id)
+        self.uniqueness_validator.record_remove(path, dv_id)
     }
 }
 
@@ -333,7 +335,7 @@ mod tests {
     }
 
     fn validate_remove_files(removes: &[FilteredEngineData]) -> KernelResult<()> {
-        let mut file_actions = FileActionTracker::default();
-        super::validate_remove_files(removes, Some(&mut file_actions))
+        let mut uniqueness_validator = FileActionUniquenessValidator::default();
+        super::validate_remove_files(removes, Some(&mut uniqueness_validator))
     }
 }
