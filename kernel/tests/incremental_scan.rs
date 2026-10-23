@@ -30,9 +30,7 @@ use delta_kernel::{
     Engine, EvaluationHandler, JsonHandler, ParquetHandler, Snapshot, SnapshotRef, StorageHandler,
 };
 use rstest::rstest;
-use test_utils::delta_kernel_default_engine::executor::tokio::{
-    TokioBackgroundExecutor, TokioMultiThreadExecutor,
-};
+use test_utils::delta_kernel_default_engine::executor::tokio::TokioBackgroundExecutor;
 use test_utils::delta_kernel_default_engine::json::DefaultJsonHandler;
 use test_utils::delta_kernel_default_engine::{DefaultEngine, DefaultEngineBuilder};
 use test_utils::{
@@ -1287,32 +1285,35 @@ async fn partitioned_snapshot(
     Ok((engine, snapshot))
 }
 
-#[rstest]
 #[tokio::test]
-async fn incremental_scan_partition_values_options(
-    #[values(None, Some("America/Los_Angeles"), Some("Not/AZone"))] timezone: Option<&str>,
-    #[values(false, true)] parsed_struct: bool,
+async fn incremental_scan_does_not_support_requsted_parsed_partition_values(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, target) = partitioned_snapshot(Partitioning::Timestamp).await?;
-    let mut partition_values = if parsed_struct {
-        PartitionValuesOptions::with_struct()
-    } else {
-        PartitionValuesOptions::default()
-    };
+    let result = target
+        .incremental_scan_builder(0 /* base_version */)
+        .with_partition_values(PartitionValuesOptions::with_struct())
+        .build(engine.as_ref());
+    assert_result_error_with_message(
+        result,
+        "Kernel does not yet support returning parsed partition values in incremental scans",
+    );
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test]
+async fn incremental_scan_preserves_raw_partition_values_without_parsed_partition(
+    #[values(None, Some("America/Los_Angeles"))] timezone: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, target) = partitioned_snapshot(Partitioning::Timestamp).await?;
+    let mut partition_values = PartitionValuesOptions::default();
     if let Some(timezone) = timezone {
         partition_values = partition_values.with_timestamp_timezone(timezone);
     }
     let result = target
-        .incremental_scan_builder(0)
+        .incremental_scan_builder(0 /* base_version */)
         .with_partition_values(partition_values)
         .build(engine.as_ref());
-    if parsed_struct {
-        assert_result_error_with_message(
-            result,
-            "Kernel does not yet support returning parsed partition values in incremental scans",
-        );
-        return Ok(());
-    }
 
     let listing = unwrap_listing(result?);
     assert_eq!(
@@ -1347,7 +1348,7 @@ async fn incremental_scan_partition_values_options(
         1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
     ))),
     None /* timezone: default UTC */,
-    Ok(1) /* expected surviving file count */
+    1 /* expected surviving file count */
 )]
 // Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
 // The file is expected to be pruned.
@@ -1356,7 +1357,7 @@ async fn incremental_scan_partition_values_options(
         1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
     ))),
     None /* timezone: default UTC */,
-    Ok(0) /* expected surviving file count */
+    0 /* expected surviving file count */
 )]
 // Under America/Los_Angeles, the offset-less value is interpreted as
 // 2024-01-15T20:30:45.123456Z (UTC). The file is expected to be pruned.
@@ -1365,7 +1366,7 @@ async fn incremental_scan_partition_values_options(
         1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
     ))),
     Some("America/Los_Angeles") /* timezone */,
-    Ok(0) /* expected surviving file count */
+    0 /* expected surviving file count */
 )]
 // Under America/Los_Angeles, the offset-less value is interpreted as
 // 2024-01-15T20:30:45.123456Z (UTC). The file is expected not to be pruned.
@@ -1374,7 +1375,7 @@ async fn incremental_scan_partition_values_options(
         1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
     ))),
     Some("America/Los_Angeles") /* timezone */,
-    Ok(1) /* expected surviving file count */
+    1 /* expected surviving file count */
 )]
 // Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
 // The file is expected not to be pruned.
@@ -1383,7 +1384,7 @@ async fn incremental_scan_partition_values_options(
         1_705_321_845_123_456 /* 2024-01-15T12:30:45.123456Z (UTC) */
     ))),
     None /* timezone: default UTC */,
-    Ok(1) /* expected surviving file count */
+    1 /* expected surviving file count */
 )]
 // Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
 // The file is expected not to be pruned.
@@ -1392,7 +1393,7 @@ async fn incremental_scan_partition_values_options(
         1_705_321_845_123_456 /* 2024-01-15T12:30:45.123456Z (UTC) */
     ))),
     None /* timezone: default UTC */,
-    Ok(1) /* expected surviving file count */
+    1 /* expected surviving file count */
 )]
 // Under UTC, the offset-less value is interpreted as 2024-01-15T12:30:45.123456Z (UTC).
 // The file is expected not to be pruned.
@@ -1401,7 +1402,7 @@ async fn incremental_scan_partition_values_options(
         1_705_321_845_123_456 /* 2024-01-15T12:30:45.123456Z (UTC) */
     ))),
     None /* timezone: default UTC */,
-    Ok(1) /* expected surviving file count */
+    1 /* expected surviving file count */
 )]
 // Under America/Los_Angeles, the offset-less value is interpreted as
 // 2024-01-15T20:30:45.123456Z (UTC). The file is expected not to be pruned.
@@ -1410,7 +1411,7 @@ async fn incremental_scan_partition_values_options(
         1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
     ))),
     Some("America/Los_Angeles") /* timezone */,
-    Ok(1) /* expected surviving file count */
+    1 /* expected surviving file count */
 )]
 // Under America/Los_Angeles, the offset-less value is interpreted as
 // 2024-01-15T20:30:45.123456Z (UTC). The file is expected not to be pruned.
@@ -1419,7 +1420,7 @@ async fn incremental_scan_partition_values_options(
         1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
     ))),
     Some("America/Los_Angeles") /* timezone */,
-    Ok(1) /* expected surviving file count */
+    1 /* expected surviving file count */
 )]
 // Under America/Los_Angeles, the offset-less value is interpreted as
 // 2024-01-15T20:30:45.123456Z (UTC). The file is expected not to be pruned.
@@ -1428,67 +1429,49 @@ async fn incremental_scan_partition_values_options(
         1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
     ))),
     Some("America/Los_Angeles") /* timezone */,
-    Ok(1) /* expected surviving file count */
-)]
-// Under an invalid timezone, parsing the offset-less value is expected to fail.
-#[case::invalid_timezone(
-    col!("p_ts").gt(lit(Scalar::Timestamp(
-        1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
-    ))),
-    Some("Not/AZone") /* timezone */,
-    Err("Not/AZone") /* expected parsing error */
+    1 /* expected surviving file count */
 )]
 #[tokio::test]
 async fn incremental_scan_partition_predicate_uses_timezone(
     #[case] predicate: Pred,
     #[case] timezone: Option<&str>,
-    #[case] expected: Result<usize, &str>,
+    #[case] expected: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, target) = partitioned_snapshot(Partitioning::Timestamp).await?;
     let mut partition_values = PartitionValuesOptions::default();
     if let Some(timezone) = timezone {
         partition_values = partition_values.with_timestamp_timezone(timezone);
     }
-    let result = target
-        .incremental_scan_builder(0)
+    let listing = target
+        .incremental_scan_builder(0 /* base_version */)
         .with_predicate(Arc::new(predicate))
         .with_partition_values(partition_values)
         .build(engine.as_ref())?
         .expect("expected an incremental scan stream")
-        .into_listing();
-
-    match expected {
-        Ok(count) => assert_eq!(live_add_count(&result?), count),
-        Err(message) => assert_result_error_with_message(result, message),
-    }
+        .into_listing()?;
+    assert_eq!(live_add_count(&listing), expected);
     Ok(())
 }
 
 #[rstest]
 #[case::timestamp_partition(
     Partitioning::Timestamp,
-    col!("p_ts").gt(lit(Scalar::Timestamp(0))),
-    true /* expected_error */
+    col!("p_ts").gt(lit(Scalar::Timestamp(
+        1_705_334_400_000_000 /* 2024-01-15T16:00:00Z (UTC) */
+    ))),
 )]
 #[case::int_partition(
     Partitioning::Integer,
     col!("p_int").gt(lit(0)),
-    true /* expected_error */
-)]
-#[case::unpartitioned(
-    Partitioning::Unpartitioned,
-    col!("p_ts").gt(lit(Scalar::Timestamp(0))),
-    false /* expected_error */
 )]
 #[tokio::test]
-async fn incremental_scan_reports_invalid_timezone_only_when_expression_used(
+async fn incremental_scan_reports_invalid_timezone_when_expression_used(
     #[case] partitioning: Partitioning,
     #[case] predicate: Pred,
-    #[case] expected_error: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, target) = partitioned_snapshot(partitioning).await?;
     let stream = target
-        .incremental_scan_builder(0)
+        .incremental_scan_builder(0 /* base_version */)
         .with_predicate(Arc::new(predicate))
         .with_partition_values(
             PartitionValuesOptions::default().with_timestamp_timezone("Not/AZone"),
@@ -1497,11 +1480,185 @@ async fn incremental_scan_reports_invalid_timezone_only_when_expression_used(
         .expect("expected an incremental scan stream");
     let result = stream.into_listing();
 
-    if expected_error {
-        assert_result_error_with_message(result, "Not/AZone");
-    } else {
-        assert_eq!(live_add_count(&result?), 1);
-    }
+    assert_result_error_with_message(result, "Invalid timestamp timezone: Not/AZone");
+    Ok(())
+}
+
+#[rstest]
+#[case::no_predicate(
+    Partitioning::Timestamp,
+    None /* predicate */,
+)]
+#[case::unpartitioned(
+    Partitioning::Unpartitioned,
+    Some(col!("p_ts").gt(lit(Scalar::Timestamp(0)))),
+)]
+#[case::data_column_predicate(
+    Partitioning::Timestamp,
+    Some(col!("value").gt(lit(0))),
+)]
+#[tokio::test]
+async fn incremental_scan_ignores_invalid_timezone_without_partition_predicate(
+    #[case] partitioning: Partitioning,
+    #[case] predicate: Option<Pred>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, target) = partitioned_snapshot(partitioning).await?;
+    let listing = target
+        .incremental_scan_builder(0 /* base_version */)
+        .with_predicate(predicate.map(Arc::new))
+        .with_partition_values(
+            PartitionValuesOptions::default().with_timestamp_timezone("Not/AZone"),
+        )
+        .build(engine.as_ref())?
+        .expect("expected an incremental scan stream")
+        .into_listing()?;
+    assert_eq!(live_add_count(&listing), 1);
+    Ok(())
+}
+
+#[rstest]
+#[case::less_than(
+    col!("val").lt(lit(Scalar::Timestamp(
+        1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
+    ))),
+    &["base_before.parquet", "delta_before.parquet"],
+)]
+#[case::less_than_or_equal(
+    col!("val").le(lit(Scalar::Timestamp(
+        1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
+    ))),
+    &["base_before.parquet", "base_equal.parquet", "delta_before.parquet", "delta_equal.parquet"],
+)]
+#[case::equal(
+    col!("val").eq(lit(Scalar::Timestamp(
+        1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
+    ))),
+    &["base_equal.parquet", "delta_equal.parquet"],
+)]
+#[case::greater_than_or_equal(
+    col!("val").ge(lit(Scalar::Timestamp(
+        1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
+    ))),
+    &["base_equal.parquet", "base_after.parquet", "delta_equal.parquet", "delta_after.parquet"],
+)]
+#[case::greater_than(
+    col!("val").gt(lit(Scalar::Timestamp(
+        1_705_350_645_123_456 /* 2024-01-15T20:30:45.123456Z (UTC) */
+    ))),
+    &["base_after.parquet", "delta_after.parquet"],
+)]
+#[tokio::test]
+async fn incremental_scan_from_cached_snapshot_matches_full_scan_with_timezone(
+    #[case] predicate: Pred,
+    #[case] expected_paths: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (storage, engine, table_url) = setup_test();
+    let schema = schema_ref! {
+        nullable "val": TIMESTAMP,
+        nullable "value": INTEGER,
+    };
+    create_table(
+        table_url.as_str(),
+        schema,
+        "Test/1.0",
+        true, /* data_change */
+    )
+    .with_data_layout(DataLayout::partitioned(["val"]))
+    .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+    .commit(engine.as_ref())?
+    .unwrap_committed();
+
+    // Raw actions preserve offset-less values; Kernel's writer emits explicit offsets.
+    let before = "2024-01-15 11:30:45.123456";
+    let equal = "2024-01-15 12:30:45.123456";
+    let after = "2024-01-15 13:30:45.123456";
+    add_commit(
+        table_url.as_str(),
+        storage.as_ref(),
+        1, /* version */
+        [
+            add_partitioned("base_before.parquet", before),
+            add_partitioned("base_equal.parquet", equal),
+            add_partitioned("base_after.parquet", after),
+            add_partitioned("base_removed.parquet", equal),
+        ]
+        .join("\n"),
+    )
+    .await?;
+    let base = Snapshot::builder_for(table_url.as_str())
+        .at_version(1 /* version */)
+        .build(engine.as_ref())?;
+    let predicate = Arc::new(predicate);
+    let partition_values =
+        PartitionValuesOptions::default().with_timestamp_timezone("America/Los_Angeles");
+    let mut reconciled = full_scan_surviving_paths(
+        base.clone(),
+        engine.as_ref(),
+        predicate.clone(),
+        partition_values.clone(),
+    )?;
+    assert!(!reconciled.is_empty());
+
+    add_commit(
+        table_url.as_str(),
+        storage.as_ref(),
+        2, /* version */
+        [
+            remove_action("base_removed.parquet"),
+            add_partitioned("delta_before.parquet", before),
+            add_partitioned("delta_equal.parquet", equal),
+            add_partitioned("temporary.parquet", after),
+        ]
+        .join("\n"),
+    )
+    .await?;
+    add_commit(
+        table_url.as_str(),
+        storage.as_ref(),
+        3, /* version */
+        [
+            remove_action("temporary.parquet"),
+            add_partitioned("delta_after.parquet", after),
+        ]
+        .join("\n"),
+    )
+    .await?;
+
+    let target = Snapshot::builder_from(base.clone()).build(engine.as_ref())?;
+    assert_eq!(target.version(), 3);
+    let cold_target = Snapshot::builder_for(table_url.as_str())
+        .at_version(target.version())
+        .build(engine.as_ref())?;
+    let cold_paths = full_scan_surviving_paths(
+        cold_target,
+        engine.as_ref(),
+        predicate.clone(),
+        partition_values.clone(),
+    )?;
+    let listing = unwrap_listing(
+        target
+            .incremental_scan_builder(base.version())
+            .with_predicate(predicate)
+            .with_partition_values(partition_values)
+            .build(engine.as_ref())?,
+    );
+    assert_eq!(
+        listing.summary.removes,
+        HashSet::from([key("base_removed.parquet"), key("temporary.parquet")])
+    );
+    assert!(!listing.summary.live_adds.is_empty());
+    assert_eq!(live_add_count(&listing), listing.summary.live_adds.len());
+    reconciled.retain(|path| !listing.summary.removes.contains(&key(path)));
+    reconciled.extend(
+        listing
+            .summary
+            .live_adds
+            .iter()
+            .map(|file| file.path().to_string()),
+    );
+    let expected: HashSet<_> = expected_paths.iter().map(|path| path.to_string()).collect();
+    assert_eq!(reconciled, expected);
+    assert_eq!(reconciled, cold_paths);
     Ok(())
 }
 
@@ -2150,8 +2307,6 @@ async fn column_free_predicate_keeps_all_added_files() -> Result<(), Box<dyn std
 // prunes via the checkpoint's `stats_parsed`, the incremental delta over `(base, target]` prunes
 // via JSON, and `full_scan(base) union live_adds` must equal `full_scan(target)`.
 
-type MtEngine = DefaultEngine<TokioMultiThreadExecutor>;
-
 // Single-column `id: integer` table.
 fn id_schema() -> Arc<StructType> {
     schema_ref! {
@@ -2173,14 +2328,19 @@ fn id_batch(schema: &Arc<StructType>, id: i32) -> RecordBatch {
 // checkpoint prunes using the checkpoint's `stats_parsed`.
 fn full_scan_surviving_paths(
     snapshot: SnapshotRef,
-    engine: &MtEngine,
+    engine: &dyn Engine,
     predicate: PredicateRef,
+    partition_values: PartitionValuesOptions,
 ) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
     fn insert_path(paths: &mut HashSet<String>, scan_file: ScanFile) {
         paths.insert(scan_file.path);
     }
 
-    let scan = snapshot.scan_builder().with_predicate(predicate).build()?;
+    let scan = snapshot
+        .scan_builder()
+        .with_predicate(predicate)
+        .with_partition_values(partition_values)
+        .build()?;
     let mut paths: HashSet<String> = HashSet::new();
     for sm in scan.scan_metadata(engine)? {
         paths = sm?.visit_scan_files(paths, insert_path)?;
@@ -2233,12 +2393,22 @@ async fn predicate_pushdown_reconciled_with_base_matches_full_scan_across_checkp
     let base = Snapshot::builder_for(table_url.clone())
         .at_version(base_version)
         .build(engine.as_ref())?;
-    let base_paths = full_scan_surviving_paths(base, engine.as_ref(), predicate.clone())?;
+    let base_paths = full_scan_surviving_paths(
+        base,
+        engine.as_ref(),
+        predicate.clone(),
+        PartitionValuesOptions::default(),
+    )?;
 
     let target = Snapshot::builder_for(table_url)
         .at_version(target_version)
         .build(engine.as_ref())?;
-    let target_paths = full_scan_surviving_paths(target, engine.as_ref(), predicate.clone())?;
+    let target_paths = full_scan_surviving_paths(
+        target,
+        engine.as_ref(),
+        predicate.clone(),
+        PartitionValuesOptions::default(),
+    )?;
 
     // Incremental delta over `(base, target]` (parses `add.stats` JSON).
     let listing = unwrap_listing(

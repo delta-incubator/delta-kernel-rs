@@ -64,7 +64,8 @@ impl IncrementalScanBuilder {
         self
     }
 
-    /// Configure partition value parsing for the incremental scan. See [`PartitionValuesOptions`].
+    /// Configure how partition values are interpreted when pruning with [`Self::with_predicate`].
+    /// The timezone option has no effect without a predicate on partition columns.
     ///
     /// Defaults to [`PartitionValuesOptions::default`].
     ///
@@ -96,9 +97,12 @@ impl IncrementalScanBuilder {
     /// baseRowId) should interpret each row against the protocol at that row's commit
     /// version, not naively against the target snapshot.
     ///
+    /// An unrecognized timestamp timezone causes an error when the stream evaluates a partition
+    /// expression, not when the scan is built.
+    ///
     /// # Errors
     /// - `Err` if `base_version >= target_snapshot.version()` (caller error).
-    /// - `Err` if typed partition value output is requested.
+    /// - [`KernelError::Unsupported`] if typed partition value output is requested.
     /// - [`KernelError::MissingColumn`] if a [`with_predicate`](Self::with_predicate) predicate
     ///   references a column absent from the table schema.
     /// - `Err` if the target snapshot's protocol contains an unsupported reader feature.

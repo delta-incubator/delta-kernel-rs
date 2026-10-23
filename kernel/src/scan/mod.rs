@@ -358,7 +358,11 @@ impl PartitionValuesOptions {
         Self::default()
     }
 
-    /// Emit the typed `partitionValues_parsed` struct alongside the raw string map.
+    /// When this is called, the read output gains a
+    /// `partitionValues_parsed` struct column with one typed nullable field per partition column
+    /// (physical names, table partition-column order). On non-partitioned tables the column is
+    /// omitted. Values come directly from the checkpoint's native `partitionValues_parsed` column
+    /// when present, otherwise from parsing the string map.
     pub fn with_struct() -> Self {
         Self {
             parsed_struct: true,
@@ -389,13 +393,14 @@ impl PartitionValuesOptions {
     /// were set on those tables.
     ///
     /// Without this option, Kernel interprets offset-less timestamps as UTC. Invalid timezones
-    /// cause errors only when Kernel uses them, not when this option is set or the scan is built.
-    // TODO(#3609): Row transforms always parse `addFile.partitionValues` instead of using
-    // compatible `partitionValues_parsed` from checkpoints and are not timezone-aware.
-    // Support using those parsed values and enable timezone support.
+    /// cause errors only when Kernel evaluates an expression with the timezone, not when this
+    /// option is set or the scan is built.
     ///
     /// [Delta protocol]:
     /// https://github.com/delta-io/delta/blob/master/PROTOCOL.md#partition-value-serialization
+    // TODO(#3609): Row transforms always parse `addFile.partitionValues` instead of using
+    // compatible `partitionValues_parsed` from checkpoints and are not timezone-aware.
+    // Support using those parsed values and enable timezone support.
     pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self
