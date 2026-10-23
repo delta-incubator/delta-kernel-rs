@@ -68,8 +68,8 @@ impl IncrementalScanBuilder {
     ///
     /// Defaults to [`PartitionValuesOptions::default`].
     ///
-    /// Kernel does not yet support [`PartitionValuesOptions::with_struct`] in incremental scans.
-    /// Passing it causes [`Self::build`] to return an error.
+    /// TODO(#3702): Kernel does not yet support [`PartitionValuesOptions::with_struct`] in
+    /// incremental scans. Passing it causes [`Self::build`] to return an error. Support that.
     pub fn with_partition_values(
         mut self,
         partition_values_options: PartitionValuesOptions,
@@ -116,7 +116,7 @@ impl IncrementalScanBuilder {
                 self.base_version, target_version
             ))
         );
-        // TODO(#3609): Support returning parsed partition values in incremental scans.
+        // TODO(#3702): Support returning parsed partition values in incremental scans.
         require!(
             !self.partition_values_options.parsed_struct,
             KernelError::unsupported(

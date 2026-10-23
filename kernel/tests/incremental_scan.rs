@@ -1226,9 +1226,15 @@ fn add_partitioned(path: &str, val: &str) -> String {
     )
 }
 
+#[derive(Debug, PartialEq)]
+enum Partitioning {
+    Unpartitioned,
+    Timestamp,
+    Integer,
+}
+
 async fn partitioned_snapshot(
-    timestamp_partition: bool,
-    int_partition: bool,
+    partitioning: Partitioning,
 ) -> Result<(Arc<DefaultEngine<TokioBackgroundExecutor>>, SnapshotRef), Box<dyn std::error::Error>>
 {
     let (storage, engine, table_url) = setup_test();
@@ -1239,14 +1245,14 @@ async fn partitioned_snapshot(
     };
     let mut partition_columns = Vec::new();
     let mut partition_values = serde_json::Map::new();
-    if timestamp_partition {
+    if partitioning == Partitioning::Timestamp {
         partition_columns.push("p_ts");
         partition_values.insert(
             "p_ts".into(),
             serde_json::json!("2024-01-15 12:30:45.123456"),
         );
     }
-    if int_partition {
+    if partitioning == Partitioning::Integer {
         partition_columns.push("p_int");
         partition_values.insert("p_int".into(), serde_json::json!("42"));
     }
@@ -1287,11 +1293,7 @@ async fn incremental_scan_partition_values_options(
     #[values(None, Some("America/Los_Angeles"), Some("Not/AZone"))] timezone: Option<&str>,
     #[values(false, true)] parsed_struct: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (engine, target) = partitioned_snapshot(
-        true,  /* timestamp_partition */
-        false, /* int_partition */
-    )
-    .await?;
+    let (engine, target) = partitioned_snapshot(Partitioning::Timestamp).await?;
     let mut partition_values = if parsed_struct {
         PartitionValuesOptions::with_struct()
     } else {
@@ -1442,11 +1444,7 @@ async fn incremental_scan_partition_predicate_uses_timezone(
     #[case] timezone: Option<&str>,
     #[case] expected: Result<usize, &str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (engine, target) = partitioned_snapshot(
-        true,  /* timestamp_partition */
-        false, /* int_partition */
-    )
-    .await?;
+    let (engine, target) = partitioned_snapshot(Partitioning::Timestamp).await?;
     let mut partition_values = PartitionValuesOptions::default();
     if let Some(timezone) = timezone {
         partition_values = partition_values.with_timestamp_timezone(timezone);
@@ -1468,31 +1466,27 @@ async fn incremental_scan_partition_predicate_uses_timezone(
 
 #[rstest]
 #[case::timestamp_partition(
-    true /* timestamp_partition */,
-    false /* int_partition */,
+    Partitioning::Timestamp,
     col!("p_ts").gt(lit(Scalar::Timestamp(0))),
     true /* expected_error */
 )]
 #[case::int_partition(
-    false /* timestamp_partition */,
-    true /* int_partition */,
+    Partitioning::Integer,
     col!("p_int").gt(lit(0)),
     true /* expected_error */
 )]
 #[case::unpartitioned(
-    false /* timestamp_partition */,
-    false /* int_partition */,
+    Partitioning::Unpartitioned,
     col!("p_ts").gt(lit(Scalar::Timestamp(0))),
     false /* expected_error */
 )]
 #[tokio::test]
 async fn incremental_scan_reports_invalid_timezone_only_when_expression_used(
-    #[case] timestamp_partition: bool,
-    #[case] int_partition: bool,
+    #[case] partitioning: Partitioning,
     #[case] predicate: Pred,
     #[case] expected_error: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (engine, target) = partitioned_snapshot(timestamp_partition, int_partition).await?;
+    let (engine, target) = partitioned_snapshot(partitioning).await?;
     let stream = target
         .incremental_scan_builder(0)
         .with_predicate(Arc::new(predicate))
