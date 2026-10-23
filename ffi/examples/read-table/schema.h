@@ -346,6 +346,8 @@ DEFINE_VISIT_SIMPLE_TYPE(binary)
 DEFINE_VISIT_SIMPLE_TYPE(date)
 DEFINE_VISIT_SIMPLE_TYPE(timestamp)
 DEFINE_VISIT_SIMPLE_TYPE(timestamp_ntz)
+DEFINE_VISIT_SIMPLE_TYPE(timestamp_nanos)
+DEFINE_VISIT_SIMPLE_TYPE(timestamp_nanos_ntz)
 DEFINE_VISIT_SIMPLE_TYPE(void)
 DEFINE_VISIT_SIMPLE_TYPE(variant)
 
@@ -477,6 +479,8 @@ CSchema* build_cschema(SharedSchema* schema, SharedExternEngine* engine)
     .visit_interval_day_time = visit_interval_day_time,
     .visit_void = visit_void,
     .visit_variant = visit_variant,
+    .visit_timestamp_nanos = visit_timestamp_nanos,
+    .visit_timestamp_nanos_ntz = visit_timestamp_nanos_ntz,
   };
   uintptr_t schema_list_id = visit_schema(schema, &visitor);
 #ifdef VERBOSE

@@ -303,7 +303,7 @@ is the source of truth. Key concepts:
   `icebergCompatV3`, `identityColumns`, `inCommitTimestamp`, `invariants`,
   `materializePartitionColumns`, `rowTracking`
 - Reader + writer: `adaptiveMetadata-preview`, `catalogManaged`, `catalogOwned-preview`,
-  `columnMapping`, `deletionVectors`, `geospatial`, `timestampNtz`,
+  `columnMapping`, `deletionVectors`, `geospatial`, `timestampNtz`, `timestampNanos`,
   `typeWidening`, `typeWidening-preview`, `v2Checkpoint`, `vacuumProtocolCheck`,
   `variantShredding`, `variantShredding-preview`, `variantType`, `variantType-preview`
 
