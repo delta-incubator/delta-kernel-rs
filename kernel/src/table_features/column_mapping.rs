@@ -672,8 +672,8 @@ fn flat_cm_info_for_nested_data_type(
             )))
         }
         // Primitive, Variant, and File types don't contain nested struct fields - return as-is
-        // TODO(#3608): annotate the `file` sub-fields with their reserved ids (the `file` field's
-        // id plus each sub-field's offset) so that writers write them as Parquet field ids.
+        // TODO(#3608): validate IDs in delta.columnMapping.nested.ids, including collisions
+        // with reserved FILE sub-field IDs and the 32-bit ID limit.
         DataType::Primitive(_) | DataType::Variant(_) | DataType::File(_) => Ok(data_type.clone()),
         #[cfg(feature = "udt-in-dev")]
         DataType::UserDefined(_) => Ok(data_type.clone()),
