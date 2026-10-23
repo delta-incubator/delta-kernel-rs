@@ -98,11 +98,12 @@ pub(crate) fn read_add_actions_from_amt(
 
 /// Values the read path needs but cannot derive from an AMT entry, so the caller must supply them.
 ///
-/// The AMT entry carries neither the data file's modification time nor a `dataChange` flag, so
-/// without this context the reader would have to invent both. Supplying them here keeps the
-/// function signature stable once a real source (e.g. the commit timestamp) is threaded through.
+/// The context carries the table root that relative entry locations resolve against. The AMT entry
+/// also lacks the data file's modification time and a `dataChange` flag, so without this context
+/// the reader would have to invent both. Supplying them here keeps the function signature
+/// stable once a real source (e.g. the commit timestamp) is threaded through.
 pub(crate) struct ReadContext {
-    /// The table root URL relative manifest locations resolve against. Must end with `/`.
+    /// The table root URL relative manifest locations resolve against.
     pub(crate) table_root: Url,
     /// Emitted as `Add.modificationTime`.
     pub(crate) modification_time: i64,
