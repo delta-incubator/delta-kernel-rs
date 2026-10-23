@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::os::raw::c_int;
 
 use delta_kernel::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
-use delta_kernel::transaction::Transaction;
+use delta_kernel::transaction::builder::update_table::ExistingTableBuilderState;
+use delta_kernel::transaction::{SupportsDataFiles, Transaction};
 use delta_kernel::{KernelError, KernelResult};
 use delta_kernel_ffi_macros::handle_descriptor;
 
@@ -249,13 +250,15 @@ pub unsafe extern "C" fn update_table_txn_update_deletion_vectors(
     let dv_map = unsafe { dv_map.into_inner() };
     let scan_iter = unsafe { scan_iter.into_inner() };
     let engine_ref = unsafe { engine.as_ref() };
-    update_table_txn_update_deletion_vectors_impl(txn_ref, *dv_map, &scan_iter)
+    stage_deletion_vector_updates(txn_ref, *dv_map, &scan_iter)
         .map(|_| true)
         .into_extern_result(&engine_ref)
 }
 
-fn update_table_txn_update_deletion_vectors_impl(
-    txn: &mut Transaction,
+pub(super) fn stage_deletion_vector_updates<
+    T: SupportsDataFiles<BuilderState = ExistingTableBuilderState>,
+>(
+    txn: &mut Transaction<T>,
     dv_map: DvDescriptorMap,
     scan_iter: &crate::scan::ScanMetadataIterator,
 ) -> KernelResult<()> {

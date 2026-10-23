@@ -22,6 +22,8 @@ mod row_tracking_preservation {
     use delta_kernel::actions::deletion_vector_writer::KernelDeletionVector;
     use delta_kernel::arrow::array::{Array, ArrayRef, MapBuilder, StringArray, StringBuilder};
     use delta_kernel::schema::{DataType, SchemaRef, StructField};
+    use delta_kernel::transaction::builder::update_table::ExistingTableBuilderState;
+    use delta_kernel::transaction::{SupportsDataFiles, Transaction};
     use test_utils::delta_kernel_default_engine::executor::tokio::TokioMultiThreadExecutor;
     use test_utils::delta_kernel_default_engine::DefaultEngine;
     use test_utils::{read_actions_from_commit, read_add_infos};
@@ -154,7 +156,7 @@ mod row_tracking_preservation {
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
         let commit_version = snapshot
-            .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
+            .alter_table("test-engine")
             .add_column(StructField::nullable("added", DataType::INTEGER))
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -456,8 +458,9 @@ mod row_tracking_preservation {
     }
 
     #[rstest::rstest]
-    #[case::minimum_feature_set(&[("delta.enableRowTracking", "true")])]
-    #[case::maximum_feature_set(&[
+    #[case::minimum_feature_set(false, &[("delta.enableRowTracking", "true")])]
+    #[case::alter(true, &[("delta.enableRowTracking", "true")])]
+    #[case::maximum_feature_set(false, &[
         ("delta.columnMapping.mode", "name"),
         ("delta.enableDeletionVectors", "true"),
         ("delta.enableRowTracking", "true"),
@@ -470,6 +473,7 @@ mod row_tracking_preservation {
     ])]
     #[tokio::test(flavor = "multi_thread")]
     async fn optimize_preserves_row_tracking_metadata_in_data_and_checkpoint(
+        #[case] alter: bool,
         #[case] table_properties: &[(&str, &str)],
     ) -> KernelResult<()> {
         // === Write two source files ===
@@ -522,7 +526,7 @@ mod row_tracking_preservation {
 
         // === Rewrite the rows into one file ===
         let optimized_snapshot =
-            rewrite_preserving_row_tracking(source_snapshot, &engine, merged_batch).await?;
+            rewrite_preserving_row_tracking(source_snapshot, &engine, merged_batch, alter).await?;
         let optimize_version = optimized_snapshot.version();
 
         let optimized_batches = read_row_tracking_scan(
@@ -652,7 +656,7 @@ mod row_tracking_preservation {
 
         // === Rewrite the surviving rows into a file without a deletion vector ===
         let optimized_snapshot =
-            rewrite_preserving_row_tracking(deletion_vector_snapshot, &engine, merged_batch)
+            rewrite_preserving_row_tracking(deletion_vector_snapshot, &engine, merged_batch, false)
                 .await?;
 
         // === Verify the OPTIMIZE result ===
@@ -675,11 +679,33 @@ mod row_tracking_preservation {
         snapshot: Arc<Snapshot>,
         engine: &Arc<DefaultEngine<TokioMultiThreadExecutor>>,
         batch: RecordBatch,
+        alter: bool,
     ) -> KernelResult<Arc<Snapshot>> {
-        let source_files = get_scan_files(snapshot.clone(), engine.as_ref())?;
-        let mut txn = snapshot
-            .update_table(UpdateTableOperation::Optimize, "test-engine", false)
-            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+        if alter {
+            let txn = snapshot
+                .clone()
+                .alter_table("test-engine")
+                .set_nullable(delta_kernel::expressions::column_name!("number"))
+                .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+            stage_row_tracking_rewrite(txn, snapshot, engine, batch).await
+        } else {
+            let txn = snapshot
+                .clone()
+                .update_table(UpdateTableOperation::Optimize, "test-engine", false)
+                .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+            stage_row_tracking_rewrite(txn, snapshot, engine, batch).await
+        }
+    }
+
+    async fn stage_row_tracking_rewrite<
+        T: SupportsDataFiles<BuilderState = ExistingTableBuilderState> + std::fmt::Debug,
+    >(
+        mut txn: Transaction<T>,
+        snapshot: Arc<Snapshot>,
+        engine: &Arc<DefaultEngine<TokioMultiThreadExecutor>>,
+        batch: RecordBatch,
+    ) -> KernelResult<Arc<Snapshot>> {
+        let source_files = get_scan_files(snapshot, engine.as_ref())?;
         let write_context = txn
             .write_state()?
             .write_context_builder()

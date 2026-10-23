@@ -52,6 +52,21 @@ use crate::transaction::{CreateTable, Transaction};
 /// - **`remove_files()`** — Cannot remove files from a table that has no files.
 /// - **`update_deletion_vectors()`** — Deletion vectors require an existing table.
 ///
+/// ```compile_fail,E0599
+/// use delta_kernel::engine_data::FilteredEngineData;
+/// use delta_kernel::transaction::create_table::CreateTableTransaction;
+/// fn remove_files(mut txn: CreateTableTransaction, metadata: FilteredEngineData) {
+///     txn.remove_files(metadata);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use delta_kernel::transaction::create_table::CreateTableTransaction;
+/// fn update_deletion_vectors(mut txn: CreateTableTransaction) {
+///     let _ = txn.update_deletion_vectors(Default::default(), std::iter::empty());
+/// }
+/// ```
+///
 /// # Example
 ///
 /// ```rust,no_run

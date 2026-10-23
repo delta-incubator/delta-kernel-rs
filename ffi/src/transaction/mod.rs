@@ -1,4 +1,5 @@
 //! This module holds functionality for managing transactions.
+mod alter_table;
 mod committed;
 mod create_table;
 mod deletion_vector;
@@ -10,6 +11,7 @@ mod write_context;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use alter_table::*;
 pub use committed::{
     committed_transaction_post_commit_snapshot, committed_transaction_version,
     free_committed_transaction,
@@ -22,12 +24,14 @@ pub use deletion_vector::{
 };
 use delta_kernel::committer::{Committer, FileSystemCommitter};
 use delta_kernel::schema::SchemaRef;
+use delta_kernel::transaction::builder::update_table::ExistingTableBuilderState;
 use delta_kernel::transaction::create_table::{
     CreateTableTransaction, CreateTableTransactionBuilder,
 };
 use delta_kernel::transaction::data_layout::DataLayout;
 use delta_kernel::transaction::{
-    CommittedTransaction, Transaction, UpdateTableOperation, UpdateTableTransactionBuilder,
+    AlterTableTransaction, AlterTableTransactionBuilder, CommittedTransaction, SupportsDataFiles,
+    Transaction, TransactionBuilder, UpdateTableOperation, UpdateTableTransactionBuilder,
 };
 use delta_kernel::EngineData;
 use delta_kernel_ffi_macros::handle_descriptor;
@@ -56,6 +60,23 @@ use crate::{
     ExclusiveEngineData, ExternEngine, KernelResult, KernelStringSlice, SharedExternEngine,
     SharedSnapshot, TryFromStringSlice,
 };
+
+unsafe fn stage_file_removals<T: SupportsDataFiles<BuilderState = ExistingTableBuilderState>>(
+    txn: &mut Transaction<T>,
+    data: Box<dyn EngineData>,
+    selection_vector: *const u8,
+    selection_vector_len: usize,
+) -> KernelResult<bool> {
+    let selection_vector = if selection_vector.is_null() || selection_vector_len == 0 {
+        vec![]
+    } else {
+        let raw = unsafe { std::slice::from_raw_parts(selection_vector, selection_vector_len) };
+        raw.iter().map(|&value| value != 0).collect()
+    };
+    let filtered = delta_kernel::engine_data::FilteredEngineData::try_new(data, selection_vector)?;
+    txn.remove_files(filtered);
+    Ok(true)
+}
 
 unsafe fn apply_nullable_string_map<T>(
     value: T,
@@ -94,8 +115,8 @@ fn decode_engine_schema(schema: &EngineSchema) -> KernelResult<delta_kernel::sch
 
 /// A handle for a [`CommittedTransaction`].
 ///
-/// Returned by [`update_table_txn_commit`] and [`create_table_txn_commit`]. Carries the committed
-/// version and, when available, the post-commit snapshot. Use [`committed_transaction_version`] and
+/// Returned by a successful transaction commit. Carries the committed version and, when available,
+/// the post-commit snapshot. Use [`committed_transaction_version`] and
 /// [`committed_transaction_post_commit_snapshot`] to read the contents, then release with
 /// [`free_committed_transaction`].
 #[handle_descriptor(target=CommittedTransaction, mutable=true, sized=true)]
@@ -2698,6 +2719,172 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[tokio::test]
+    async fn alter_table_shared_setters_survive_schema_chaining(
+        #[values(false, true)] schema_first: bool,
+        #[values(false, true)] transaction_setters: bool,
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
+        let (table_url, store, engine) =
+            setup_domain_metadata_table("test_alter_shared_setters", false).await?;
+        let snapshot =
+            unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
+        let mut builder = ok_or_panic(unsafe {
+            new_alter_table_txn_builder(
+                snapshot.shallow_copy(),
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            )
+        });
+        let added_fields = vec![StructField::nullable("added", DataType::LONG)];
+        let added_field = EngineSchema {
+            schema: &added_fields as *const Vec<StructField> as *mut c_void,
+            visitor: visit_test_schema,
+        };
+        if schema_first {
+            builder = ok_or_panic(unsafe {
+                alter_table_txn_builder_add_column(builder, &added_field, engine.shallow_copy())
+            });
+        }
+        let entries = [FfiNullableStringMapEntry {
+            key: ffi_str("key"),
+            value: OptionalValue::Some(ffi_str("value")),
+        }];
+        let map = unsafe { FfiNullableStringMap::new_unsafe(&entries) };
+        let commit_info_fields = vec![StructField::nullable("connectorField", DataType::STRING)];
+        let commit_info_schema = EngineSchema {
+            schema: &commit_info_fields as *const Vec<StructField> as *mut c_void,
+            visitor: visit_test_schema,
+        };
+        builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_with_correlation_id(
+                builder,
+                ffi_str("alter-correlation"),
+                engine.shallow_copy(),
+            )
+        });
+        builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_with_operation_parameters(builder, &map, engine.shallow_copy())
+        });
+        builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_with_operation_metrics(builder, &map, engine.shallow_copy())
+        });
+        builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_with_commit_info(
+                builder,
+                commit_info_engine_data("alter"),
+                &commit_info_schema,
+                engine.shallow_copy(),
+            )
+        });
+        builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_with_domain_metadata(
+                builder,
+                ffi_str("connector.domain"),
+                ffi_str("{}"),
+                engine.shallow_copy(),
+            )
+        });
+        builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_with_transaction_id(
+                builder,
+                ffi_str("alter-app"),
+                7,
+                engine.shallow_copy(),
+            )
+        });
+        if !schema_first {
+            builder = ok_or_panic(unsafe {
+                alter_table_txn_builder_add_column(builder, &added_field, engine.shallow_copy())
+            });
+        }
+        let committer: Box<dyn Committer> = Box::new(FileSystemCommitter::new());
+        let mut txn = ok_or_panic(unsafe {
+            alter_table_txn_builder_build_with_committer(
+                builder,
+                engine.shallow_copy(),
+                committer.into(),
+            )
+        });
+        if transaction_setters {
+            let entries = [FfiNullableStringMapEntry {
+                key: ffi_str("key"),
+                value: OptionalValue::Some(ffi_str("transaction")),
+            }];
+            let metrics = unsafe { FfiNullableStringMap::new_unsafe(&entries) };
+            txn = ok_or_panic(unsafe {
+                alter_table_txn_with_operation_metrics(txn, &metrics, engine.shallow_copy())
+            });
+            txn = ok_or_panic(unsafe {
+                alter_table_txn_with_commit_info(
+                    txn,
+                    commit_info_engine_data("transaction"),
+                    &commit_info_schema,
+                    engine.shallow_copy(),
+                )
+            });
+            txn = ok_or_panic(unsafe {
+                alter_table_txn_with_domain_metadata(
+                    txn,
+                    ffi_str("connector.late"),
+                    ffi_str("{}"),
+                    engine.shallow_copy(),
+                )
+            });
+        }
+        let committed = ok_or_panic(unsafe { alter_table_txn_commit(txn, engine.shallow_copy()) });
+        assert_eq!(unsafe { version_and_free(committed) }, 1);
+        let commit_info = read_commit_info_action(&store, &table_url, 1).await;
+        assert_eq!(commit_info["commitInfo"]["operation"], "ALTER TABLE");
+        assert_eq!(commit_info["commitInfo"]["engineInfo"], "test-engine/1.0");
+        assert_eq!(
+            commit_info["commitInfo"]["operationParameters"]["key"],
+            "value"
+        );
+        assert_eq!(
+            commit_info["commitInfo"]["operationMetrics"]["key"],
+            if transaction_setters {
+                "transaction"
+            } else {
+                "value"
+            }
+        );
+        assert_eq!(
+            commit_info["commitInfo"]["connectorField"],
+            if transaction_setters {
+                "transaction"
+            } else {
+                "alter"
+            }
+        );
+        let transaction = read_transaction_action(&store, &table_url, 1).await;
+        assert_eq!(transaction["txn"]["appId"], "alter-app");
+        assert_eq!(transaction["txn"]["version"], 7);
+        let post = unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
+        let post_ref = unsafe { post.as_ref() };
+        assert!(post_ref.schema().contains("added"));
+        assert_eq!(
+            post_ref.get_domain_metadata(
+                "connector.domain",
+                unsafe { engine.as_ref() }.engine().as_ref(),
+            )?,
+            Some("{}".to_string()),
+        );
+        assert_eq!(
+            post_ref.get_domain_metadata(
+                "connector.late",
+                unsafe { engine.as_ref() }.engine().as_ref(),
+            )?,
+            transaction_setters.then(|| "{}".to_string()),
+        );
+        unsafe {
+            free_snapshot(post);
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+        Ok(())
+    }
+
     #[test]
     fn create_table_builder_rejects_duplicate_operation_parameter_keys() {
         let (store, _test_engine, table_url) =
@@ -2899,6 +3086,162 @@ mod tests {
     }
 
     #[rstest]
+    #[case::ready(false, false)]
+    #[case::modifying(true, false)]
+    #[case::transaction(true, true)]
+    #[tokio::test]
+    async fn alter_table_commit_info_setters_consume_inputs_on_schema_error(
+        #[case] schema_first: bool,
+        #[case] build_transaction: bool,
+        #[values(false, true)] null_schema: bool,
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
+        let (table_url, _store, engine) =
+            setup_domain_metadata_table("test_alter_invalid_commit_info", false).await?;
+        let snapshot =
+            unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
+        let snapshot_arc = unsafe { snapshot.clone_as_arc() };
+        let snapshot_ref_count = Arc::strong_count(&snapshot_arc);
+        let mut builder = ok_or_panic(unsafe {
+            new_alter_table_txn_builder(
+                snapshot.shallow_copy(),
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            )
+        });
+        let fields = vec![StructField::nullable("added", DataType::STRING)];
+        let field = EngineSchema {
+            schema: &fields as *const Vec<StructField> as *mut c_void,
+            visitor: visit_test_schema,
+        };
+        if schema_first {
+            builder = ok_or_panic(unsafe {
+                alter_table_txn_builder_add_column(builder, &field, engine.shallow_copy())
+            });
+        }
+        let values: ArrayRef = Arc::new(StringArray::from(vec![Some("alter")]));
+        let values_lifetime = Arc::downgrade(&values);
+        let schema = schema_ref! { nullable "connectorField": STRING };
+        let arrow_schema: ArrowSchema = schema.as_ref().try_into_arrow()?;
+        let batch = RecordBatch::try_new(Arc::new(arrow_schema), vec![values])?;
+        let data: Box<dyn EngineData> = Box::new(ArrowEngineData::new(batch));
+        let invalid_schema = EngineSchema {
+            schema: std::ptr::null_mut(),
+            visitor: visit_invalid_schema_not_struct,
+        };
+        let (schema, error_type, message) = if null_schema {
+            (
+                std::ptr::null(),
+                FFIKernelError::InvalidTransactionStateError,
+                "argument must not be null",
+            )
+        } else {
+            (
+                &invalid_schema as *const EngineSchema,
+                FFIKernelError::SchemaError,
+                "Final returned id was not a struct",
+            )
+        };
+        if build_transaction {
+            let txn = ok_or_panic(unsafe {
+                alter_table_txn_builder_build(builder, engine.shallow_copy())
+            });
+            assert_extern_result_error_contains(
+                unsafe {
+                    alter_table_txn_with_commit_info(
+                        txn,
+                        data.into(),
+                        schema,
+                        engine.shallow_copy(),
+                    )
+                },
+                error_type,
+                message,
+            );
+        } else {
+            assert_extern_result_error_contains(
+                unsafe {
+                    alter_table_txn_builder_with_commit_info(
+                        builder,
+                        data.into(),
+                        schema,
+                        engine.shallow_copy(),
+                    )
+                },
+                error_type,
+                message,
+            );
+        }
+        assert!(values_lifetime.upgrade().is_none());
+        assert_eq!(Arc::strong_count(&snapshot_arc), snapshot_ref_count);
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::null_metrics(
+        true,
+        FFIKernelError::InvalidTransactionStateError,
+        "argument must not be null"
+    )]
+    #[case::invalid_domain(false, FFIKernelError::Utf8Error, "invalid utf-8")]
+    #[tokio::test]
+    async fn alter_table_transaction_setters_consume_transaction_on_error(
+        #[case] metrics: bool,
+        #[case] error_type: FFIKernelError,
+        #[case] message: &str,
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
+        let (table_url, _store, engine) =
+            setup_domain_metadata_table("test_alter_transaction_setter_error", false).await?;
+        let snapshot =
+            unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
+        let snapshot_arc = unsafe { snapshot.clone_as_arc() };
+        let snapshot_ref_count = Arc::strong_count(&snapshot_arc);
+        let builder = ok_or_panic(unsafe {
+            new_alter_table_txn_builder(
+                snapshot.shallow_copy(),
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            )
+        });
+        let fields = vec![StructField::nullable("added", DataType::STRING)];
+        let field = EngineSchema {
+            schema: &fields as *const Vec<StructField> as *mut c_void,
+            visitor: visit_test_schema,
+        };
+        let builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_add_column(builder, &field, engine.shallow_copy())
+        });
+        let txn =
+            ok_or_panic(unsafe { alter_table_txn_builder_build(builder, engine.shallow_copy()) });
+        let invalid_utf8 = [0xffu8];
+        let result = unsafe {
+            if metrics {
+                alter_table_txn_with_operation_metrics(txn, std::ptr::null(), engine.shallow_copy())
+            } else {
+                alter_table_txn_with_domain_metadata(
+                    txn,
+                    KernelStringSlice {
+                        ptr: invalid_utf8.as_ptr().cast(),
+                        len: invalid_utf8.len(),
+                    },
+                    ffi_str("{}"),
+                    engine.shallow_copy(),
+                )
+            }
+        };
+        assert_extern_result_error_contains(result, error_type, message);
+        assert_eq!(Arc::strong_count(&snapshot_arc), snapshot_ref_count);
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+        Ok(())
+    }
+
+    #[rstest]
     #[case::zero(0)]
     #[case::two(2)]
     #[tokio::test]
@@ -2913,7 +3256,7 @@ mod tests {
         let builder = unsafe {
             ok_or_panic(new_update_table_txn_builder(
                 snapshot.shallow_copy(),
-                KernelUpdateTableOperation::AlterTable,
+                KernelUpdateTableOperation::Write,
                 ffi_str("test-engine/1.0"),
                 false,
                 engine.shallow_copy(),
@@ -2961,7 +3304,6 @@ mod tests {
         ReservedCustomOperation,
         BlindAppendWithoutDataChange,
         BlindAppendWithSchemaChange,
-        AlterTableWithDataChange,
     }
 
     #[rstest]
@@ -2980,10 +3322,6 @@ mod tests {
     #[case::blind_with_schema_change(
         InvalidUpdateIntent::BlindAppendWithSchemaChange,
         "blind append cannot include schema changes"
-    )]
-    #[case::alter_with_data_change(
-        InvalidUpdateIntent::AlterTableWithDataChange,
-        "ALTER TABLE requires data_change to be false"
     )]
     #[tokio::test]
     async fn invalid_update_table_intent_maps_through_ffi(
@@ -3027,17 +3365,11 @@ mod tests {
                 };
                 unsafe { update_table_txn_builder_with_blind_append(builder) }
             }
-            InvalidUpdateIntent::BlindAppendWithSchemaChange
-            | InvalidUpdateIntent::AlterTableWithDataChange => {
-                let operation = if matches!(intent, InvalidUpdateIntent::AlterTableWithDataChange) {
-                    KernelUpdateTableOperation::AlterTable
-                } else {
-                    KernelUpdateTableOperation::Write
-                };
+            InvalidUpdateIntent::BlindAppendWithSchemaChange => {
                 let builder = unsafe {
                     ok_or_panic(new_update_table_txn_builder(
                         snapshot.shallow_copy(),
-                        operation,
+                        KernelUpdateTableOperation::Write,
                         ffi_str("test-engine/1.0"),
                         true,
                         engine.shallow_copy(),
@@ -3051,11 +3383,7 @@ mod tests {
                 let builder = ok_or_panic(unsafe {
                     update_table_txn_builder_add_column(builder, &field, engine.shallow_copy())
                 });
-                if matches!(intent, InvalidUpdateIntent::BlindAppendWithSchemaChange) {
-                    unsafe { update_table_txn_builder_with_blind_append(builder) }
-                } else {
-                    builder
-                }
+                unsafe { update_table_txn_builder_with_blind_append(builder) }
             }
         };
 
@@ -3353,26 +3681,363 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn alter_table_operation_without_schema_change_is_rejected() -> KernelResult<()> {
+    async fn alter_table_operation_without_schema_change_is_rejected(
+        #[values(false, true)] custom_committer: bool,
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_alter_requires_schema_change", false).await?;
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
         let builder = unsafe {
-            ok_or_panic(new_update_table_txn_builder(
+            ok_or_panic(new_alter_table_txn_builder(
                 snapshot.shallow_copy(),
-                KernelUpdateTableOperation::AlterTable,
                 ffi_str("test-engine/1.0"),
-                false,
                 engine.shallow_copy(),
             ))
         };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let result = if custom_committer {
+            let committer: Box<dyn Committer> = Box::new(DropTrackingCommitter(Arc::clone(&drops)));
+            unsafe {
+                alter_table_txn_builder_build_with_committer(
+                    builder,
+                    engine.shallow_copy(),
+                    committer.into(),
+                )
+            }
+        } else {
+            unsafe { alter_table_txn_builder_build(builder, engine.shallow_copy()) }
+        };
         assert_extern_result_error_contains(
-            unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) },
+            result,
             FFIKernelError::InvalidTransactionStateError,
             "ALTER TABLE requires at least one schema change",
         );
+        assert_eq!(drops.load(Ordering::SeqCst), usize::from(custom_committer));
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+        Ok(())
+    }
+
+    #[rstest]
+    #[case("column")]
+    #[case("parent")]
+    #[case("nested_field")]
+    #[case("nullable")]
+    #[case("parameters")]
+    #[case("metrics")]
+    #[tokio::test]
+    async fn alter_table_rejects_null_inputs(
+        #[case] argument: &str,
+        #[values(false, true)] schema_first: bool,
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
+        let (table_url, _store, engine) =
+            setup_domain_metadata_table("test_alter_null_input", false).await?;
+        let snapshot =
+            unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
+        let mut builder = ok_or_panic(unsafe {
+            new_alter_table_txn_builder(
+                snapshot.shallow_copy(),
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            )
+        });
+        let fields = vec![StructField::nullable("added", DataType::LONG)];
+        let field = EngineSchema {
+            schema: &fields as *const Vec<StructField> as *mut c_void,
+            visitor: visit_test_schema,
+        };
+        if schema_first {
+            builder = ok_or_panic(unsafe {
+                alter_table_txn_builder_add_column(builder, &field, engine.shallow_copy())
+            });
+        }
+        let parent_parts = [ffi_str("id")];
+        let parent = FfiColumnName {
+            path: unsafe { FfiStringArray::new_unsafe(&parent_parts) },
+        };
+        let result = unsafe {
+            match argument {
+                "column" => alter_table_txn_builder_add_column(
+                    builder,
+                    std::ptr::null(),
+                    engine.shallow_copy(),
+                ),
+                "parent" => alter_table_txn_builder_add_column_at(
+                    builder,
+                    std::ptr::null(),
+                    &field,
+                    engine.shallow_copy(),
+                ),
+                "nested_field" => alter_table_txn_builder_add_column_at(
+                    builder,
+                    &parent,
+                    std::ptr::null(),
+                    engine.shallow_copy(),
+                ),
+                "nullable" => alter_table_txn_builder_set_nullable(
+                    builder,
+                    std::ptr::null(),
+                    engine.shallow_copy(),
+                ),
+                "parameters" => alter_table_txn_builder_with_operation_parameters(
+                    builder,
+                    std::ptr::null(),
+                    engine.shallow_copy(),
+                ),
+                "metrics" => alter_table_txn_builder_with_operation_metrics(
+                    builder,
+                    std::ptr::null(),
+                    engine.shallow_copy(),
+                ),
+                _ => unreachable!(),
+            }
+        };
+        assert_extern_result_error_contains(
+            result,
+            FFIKernelError::InvalidTransactionStateError,
+            "argument must not be null",
+        );
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::without_row_tracking(false, false)]
+    #[case::row_tracking_acknowledged(true, true)]
+    #[case::row_tracking_unacknowledged(true, false)]
+    #[tokio::test]
+    async fn alter_table_file_rewrite_uses_evolved_write_state(
+        #[case] row_tracking: bool,
+        #[case] acknowledge: bool,
+        #[values(false, true)] explicit_selection: bool,
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
+        let (table_url, store, engine) =
+            setup_domain_metadata_table("test_alter_rewrite", row_tracking).await?;
+        let kernel_engine = unsafe { engine.as_ref() }.engine();
+        let initial =
+            delta_kernel::Snapshot::builder_for(&table_url).build(kernel_engine.as_ref())?;
+        let mut setup = initial
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .build(kernel_engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+        setup.add_files(test_utils::create_add_files_metadata(
+            setup.add_files_schema(),
+            vec![("old.parquet", 100, 1000, Some(2))],
+        )?);
+        let before = setup
+            .commit(kernel_engine.as_ref())?
+            .unwrap_post_commit_snapshot();
+        let snapshot: Handle<SharedSnapshot> = before.clone().into();
+        let builder = ok_or_panic(unsafe {
+            new_alter_table_txn_builder(
+                snapshot.shallow_copy(),
+                ffi_str("test-engine"),
+                engine.shallow_copy(),
+            )
+        });
+        let fields = vec![StructField::nullable("added", DataType::STRING)];
+        let schema = EngineSchema {
+            schema: &fields as *const Vec<StructField> as *mut c_void,
+            visitor: visit_test_schema,
+        };
+        let builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_add_column(builder, &schema, engine.shallow_copy())
+        });
+        let mut txn =
+            ok_or_panic(unsafe { alter_table_txn_builder_build(builder, engine.shallow_copy()) });
+        let state =
+            ok_or_panic(unsafe { alter_table_txn_write_state(&txn, engine.shallow_copy()) });
+        let context_builder = unsafe { write_context::write_context_builder(state.shallow_copy()) };
+        let context = ok_or_panic(unsafe {
+            write_context_builder_build(context_builder, engine.shallow_copy())
+        });
+        let schema = unsafe { get_write_schema(context.shallow_copy()) };
+        assert!(unsafe { schema.as_ref() }.contains("added"));
+        unsafe {
+            free_schema(schema);
+            free_write_context(context);
+            write_context::free_write_state(state);
+        }
+        let metadata = test_utils::create_add_files_metadata(
+            unsafe { txn.as_ref() }.add_files_schema(),
+            vec![("new.parquet", 100, 2000, Some(2))],
+        )?;
+        ok_or_panic(unsafe {
+            alter_table_txn_add_files(&mut txn, metadata.into(), engine.shallow_copy())
+        });
+        let scan = before.scan_builder().build()?;
+        for metadata in scan.scan_metadata(kernel_engine.as_ref())? {
+            let files = metadata?.scan_files;
+            let (data, selection) = if explicit_selection {
+                let (data, selection) = files.into_parts();
+                let selection = if selection.is_empty() {
+                    vec![1u8; data.len()]
+                } else {
+                    selection.into_iter().map(u8::from).collect()
+                };
+                (data, selection)
+            } else {
+                (files.apply_selection_vector()?, vec![])
+            };
+            ok_or_panic(unsafe {
+                alter_table_txn_remove_files(
+                    &mut txn,
+                    data.into(),
+                    selection.as_ptr(),
+                    selection.len(),
+                    engine.shallow_copy(),
+                )
+            });
+        }
+        if acknowledge {
+            ok_or_panic(unsafe {
+                alter_table_txn_ack_row_tracking_preservation(&mut txn, engine.shallow_copy())
+            });
+        }
+        let result = unsafe { alter_table_txn_commit(txn, engine.shallow_copy()) };
+        if row_tracking && !acknowledge {
+            assert_extern_result_error_contains(
+                result,
+                FFIKernelError::InvalidTransactionStateError,
+                "ack_row_tracking_preservation",
+            );
+            let fresh =
+                delta_kernel::Snapshot::builder_for(&table_url).build(kernel_engine.as_ref())?;
+            assert_eq!(fresh.version(), 1);
+            assert!(!fresh.schema().contains("added"));
+            unsafe {
+                free_snapshot(snapshot);
+                free_engine(engine);
+            }
+            return Ok(());
+        }
+        let committed = ok_or_panic(result);
+        assert_eq!(unsafe { version_and_free(committed) }, 2);
+        let fresh =
+            delta_kernel::Snapshot::builder_for(&table_url).build(kernel_engine.as_ref())?;
+        assert!(fresh.schema().contains("added"));
+        let bytes = store
+            .get(&Path::from_url_path(
+                table_url
+                    .join("_delta_log/00000000000000000002.json")?
+                    .path(),
+            )?)
+            .await?
+            .bytes()
+            .await?;
+        let actions: Vec<serde_json::Value> = Deserializer::from_slice(&bytes)
+            .into_iter()
+            .collect::<std::result::Result<_, _>>()?;
+        for kind in ["add", "remove"] {
+            let actions: Vec<_> = actions
+                .iter()
+                .filter_map(|action| action.get(kind))
+                .collect();
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0]["dataChange"], false);
+            assert_eq!(
+                actions[0]["path"],
+                if kind == "add" {
+                    "new.parquet"
+                } else {
+                    "old.parquet"
+                }
+            );
+        }
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn alter_table_file_apis_reject_null_transaction() {
+        let engine = crate::ffi_test_utils::error_only_engine_handle();
+        assert_extern_result_error_contains(
+            unsafe { alter_table_txn_write_state(std::ptr::null(), engine.shallow_copy()) },
+            FFIKernelError::InvalidTransactionStateError,
+            "argument must not be null",
+        );
+        assert_extern_result_error_contains(
+            unsafe {
+                alter_table_txn_add_files(
+                    std::ptr::null_mut(),
+                    commit_info_engine_data("unused"),
+                    engine.shallow_copy(),
+                )
+            },
+            FFIKernelError::InvalidTransactionStateError,
+            "argument must not be null",
+        );
+        assert_extern_result_error_contains(
+            unsafe {
+                alter_table_txn_remove_files(
+                    std::ptr::null_mut(),
+                    commit_info_engine_data("unused"),
+                    std::ptr::null(),
+                    0,
+                    engine.shallow_copy(),
+                )
+            },
+            FFIKernelError::InvalidTransactionStateError,
+            "argument must not be null",
+        );
+        assert_extern_result_error_contains(
+            unsafe {
+                alter_table_txn_ack_row_tracking_preservation(
+                    std::ptr::null_mut(),
+                    engine.shallow_copy(),
+                )
+            },
+            FFIKernelError::InvalidTransactionStateError,
+            "argument must not be null",
+        );
+        unsafe {
+            free_engine(engine);
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn alter_table_handles_can_be_freed_without_committing(
+        #[values(false, true)] schema_first: bool,
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
+        let (table_url, _store, engine) =
+            setup_domain_metadata_table("test_alter_free_handles", false).await?;
+        let snapshot =
+            unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
+        let mut builder = ok_or_panic(unsafe {
+            new_alter_table_txn_builder(
+                snapshot.shallow_copy(),
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            )
+        });
+        if schema_first {
+            let fields = vec![StructField::nullable("added", DataType::LONG)];
+            let field = EngineSchema {
+                schema: &fields as *const Vec<StructField> as *mut c_void,
+                visitor: visit_test_schema,
+            };
+            builder = ok_or_panic(unsafe {
+                alter_table_txn_builder_add_column(builder, &field, engine.shallow_copy())
+            });
+            let txn = ok_or_panic(unsafe {
+                alter_table_txn_builder_build(builder, engine.shallow_copy())
+            });
+            unsafe { free_alter_table_txn(txn) };
+        } else {
+            unsafe { free_alter_table_txn_builder(builder) };
+        }
+        assert_eq!(unsafe { version(snapshot.shallow_copy()) }, 0);
         unsafe {
             free_snapshot(snapshot);
             free_engine(engine);
@@ -4135,8 +4800,11 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_update_table_txn_builder_applies_nested_schema_changes() -> KernelResult<()> {
+    async fn test_alter_table_txn_builder_applies_nested_schema_changes(
+        #[values(false, true)] nullable_first: bool,
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         let (store, kernel_engine, table_url) =
             test_utils::engine_store_setup("test_nested_schema_changes", None);
         let nested =
@@ -4159,11 +4827,9 @@ mod tests {
             delta_kernel::Snapshot::builder_for(table_url.clone()).build(&kernel_engine)?;
         let snapshot_handle: Handle<SharedSnapshot> = snapshot.into();
         let mut builder = unsafe {
-            ok_or_panic(new_update_table_txn_builder(
+            ok_or_panic(new_alter_table_txn_builder(
                 snapshot_handle.shallow_copy(),
-                KernelUpdateTableOperation::AlterTable,
                 ffi_str("test-engine/1.0"),
-                false,
                 engine.shallow_copy(),
             ))
         };
@@ -4179,15 +4845,6 @@ mod tests {
             schema: &added_fields as *const Vec<StructField> as *mut c_void,
             visitor: visit_test_schema,
         };
-        builder = ok_or_panic(unsafe {
-            update_table_txn_builder_add_column_at(
-                builder,
-                &parent,
-                &added_field,
-                engine.shallow_copy(),
-            )
-        });
-
         let nullable_parts = [
             kernel_string_slice!(profile_name),
             kernel_string_slice!(required_name),
@@ -4195,13 +4852,28 @@ mod tests {
         let nullable_column = FfiColumnName {
             path: unsafe { crate::delta_types::FfiStringArray::new_unsafe(&nullable_parts) },
         };
-        builder = ok_or_panic(unsafe {
-            update_table_txn_builder_set_nullable(builder, &nullable_column, engine.shallow_copy())
-        });
+        for make_nullable in [nullable_first, !nullable_first] {
+            builder = ok_or_panic(unsafe {
+                if make_nullable {
+                    alter_table_txn_builder_set_nullable(
+                        builder,
+                        &nullable_column,
+                        engine.shallow_copy(),
+                    )
+                } else {
+                    alter_table_txn_builder_add_column_at(
+                        builder,
+                        &parent,
+                        &added_field,
+                        engine.shallow_copy(),
+                    )
+                }
+            });
+        }
 
         let txn =
-            ok_or_panic(unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) });
-        let committed = ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
+            ok_or_panic(unsafe { alter_table_txn_builder_build(builder, engine.shallow_copy()) });
+        let committed = ok_or_panic(unsafe { alter_table_txn_commit(txn, engine.shallow_copy()) });
         unsafe {
             free_committed_transaction(committed);
             free_snapshot(snapshot_handle);
@@ -4613,7 +5285,122 @@ mod tests {
             .sum::<KernelResult<_>>()?;
         assert_eq!(total, 2, "expected 2 surviving rows");
 
+        // Relocate the same bitmap through ALTER without changing the surviving rows.
+        let relocated_url = table_url.join("relocated_dv.bin")?;
+        let dv_bytes = store
+            .get(&ObjectStorePath::from_url_path(dv_url.path())?)
+            .await?
+            .bytes()
+            .await?;
+        store
+            .put(
+                &ObjectStorePath::from_url_path(relocated_url.path())?,
+                dv_bytes.into(),
+            )
+            .await?;
+        let altered_snapshot =
+            unsafe { build_snapshot(ffi_str(table_path_str), engine.shallow_copy()) };
+        let builder = ok_or_panic(unsafe {
+            new_alter_table_txn_builder(
+                altered_snapshot.shallow_copy(),
+                ffi_str("test-engine"),
+                engine.shallow_copy(),
+            )
+        });
+        let fields = vec![StructField::nullable("added", DataType::STRING)];
+        let field = EngineSchema {
+            schema: &fields as *const Vec<StructField> as *mut c_void,
+            visitor: visit_test_schema,
+        };
+        let builder = ok_or_panic(unsafe {
+            alter_table_txn_builder_add_column(builder, &field, engine.shallow_copy())
+        });
+        let mut altered_txn =
+            ok_or_panic(unsafe { alter_table_txn_builder_build(builder, engine.shallow_copy()) });
+        let descriptor = ok_or_panic(unsafe {
+            dv_descriptor_new(
+                KernelDvStorageType::PersistedAbsolute as i32,
+                ffi_str(relocated_url.as_str()),
+                true,
+                dv_write_result.offset,
+                dv_write_result.size_in_bytes,
+                dv_write_result.cardinality,
+                engine.shallow_copy(),
+            )
+        });
+        let map = dv_descriptor_map_new();
+        ok_or_panic(unsafe {
+            dv_descriptor_map_insert(
+                map.shallow_copy(),
+                ffi_str(&data_file_path),
+                descriptor,
+                engine.shallow_copy(),
+            )
+        });
+        let altered_scan = ok_or_panic(unsafe {
+            scan(
+                altered_snapshot.shallow_copy(),
+                engine.shallow_copy(),
+                None,
+                None,
+            )
+        });
+        let iter = ok_or_panic(unsafe {
+            scan_metadata_iter_init(engine.shallow_copy(), altered_scan.shallow_copy())
+        });
+        ok_or_panic(unsafe {
+            alter_table_txn_update_deletion_vectors(
+                &mut altered_txn,
+                map,
+                iter,
+                engine.shallow_copy(),
+            )
+        });
+        let committed =
+            ok_or_panic(unsafe { alter_table_txn_commit(altered_txn, engine.shallow_copy()) });
+        assert_eq!(unsafe { version_and_free(committed) }, 3);
+        let snapshot =
+            delta_kernel::Snapshot::builder_for(&table_url).build(kernel_engine.as_ref())?;
+        let batches =
+            test_utils::read_scan(&snapshot.scan_builder().build()?, kernel_engine.clone())?;
+        let ids: Vec<_> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("id")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        assert_eq!(ids, [10, 40]);
+        let bytes = store
+            .get(&ObjectStorePath::from_url_path(
+                table_url
+                    .join("_delta_log/00000000000000000003.json")?
+                    .path(),
+            )?)
+            .await?
+            .bytes()
+            .await?;
+        let actions: Vec<serde_json::Value> = Deserializer::from_slice(&bytes)
+            .into_iter()
+            .collect::<std::result::Result<_, _>>()?;
+        for kind in ["add", "remove"] {
+            let actions: Vec<_> = actions
+                .iter()
+                .filter_map(|action| action.get(kind))
+                .collect();
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0]["dataChange"], false);
+        }
         unsafe {
+            free_scan(altered_scan);
+            free_snapshot(altered_snapshot);
             free_scan(scan_handle);
             free_snapshot(snap_handle);
             free_engine(engine);

@@ -29,7 +29,7 @@ use delta_kernel::log_replay::FileActionKey;
 use delta_kernel::object_store::path::Path;
 use delta_kernel::object_store::ObjectStoreExt as _;
 use delta_kernel::scan::{scan_row_schema, PartitionValuesOptions, StatsOptions};
-use delta_kernel::schema::{schema_ref, DataType, MapType};
+use delta_kernel::schema::{schema_ref, DataType, MapType, StructField};
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::{CommitResult, UpdateTableOperation};
 use delta_kernel::{
@@ -2195,13 +2195,73 @@ fn setup_table_with_dv_small() -> KernelResult<DvSmallTableSetup> {
     Ok((temp_dir, table_path, engine, snapshot))
 }
 
+#[tokio::test]
+async fn alter_table_relocates_deletion_vector_without_changing_rows(
+) -> KernelResult<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, table_path, engine, before) = setup_table_with_dv_small()?;
+    let scan = before.clone().scan_builder().build()?;
+    let expected = test_utils::read_scan(&scan, engine.clone())?;
+    let expected = concat_batches(&expected[0].schema(), &expected)?;
+    assert_eq!(expected.num_rows(), 8);
+
+    let adds = read_actions_from_commit(before.table_root(), 1, "add")?;
+    let mut descriptor: DeletionVectorDescriptor =
+        serde_json::from_value(adds[0]["deletionVector"].clone())?;
+    let source = descriptor.absolute_path(before.table_root())?.unwrap();
+    let destination = before.table_root().join("relocated-dv.bin")?;
+    std::fs::copy(
+        source.to_file_path().unwrap(),
+        table_path.join("relocated-dv.bin"),
+    )?;
+    descriptor.storage_type = DeletionVectorStorageType::PersistedAbsolute;
+    descriptor.path_or_inline_dv = destination.to_string();
+    let mut txn = before
+        .clone()
+        .alter_table("test-engine")
+        .add_column(StructField::nullable("added", DataType::STRING))
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+    txn.update_deletion_vectors(
+        HashMap::from([(adds[0]["path"].as_str().unwrap().to_string(), descriptor)]),
+        get_scan_files(before.clone(), engine.as_ref())?
+            .into_iter()
+            .map(Ok),
+    )?;
+    let post = txn.commit(engine.as_ref())?.unwrap_post_commit_snapshot();
+    let fresh = Snapshot::builder_for(before.table_root()).build(engine.as_ref())?;
+    for snapshot in [post, fresh] {
+        assert_eq!(snapshot.version(), 2);
+        let scan = snapshot.clone().scan_builder().build()?;
+        let batches = test_utils::read_scan(&scan, engine.clone())?;
+        let actual = concat_batches(&batches[0].schema(), &batches)?;
+        assert_eq!(actual.num_rows(), expected.num_rows());
+        assert_eq!(
+            actual.column_by_name("value"),
+            expected.column_by_name("value")
+        );
+        assert_eq!(actual.column_by_name("added").unwrap().null_count(), 8);
+    }
+    let adds = read_actions_from_commit(before.table_root(), 2, "add")?;
+    let removes = read_actions_from_commit(before.table_root(), 2, "remove")?;
+    assert_eq!(adds.len(), 1);
+    assert_eq!(removes.len(), 1);
+    assert_eq!(adds[0]["path"], removes[0]["path"]);
+    assert_eq!(
+        adds[0]["deletionVector"]["pathOrInlineDv"],
+        destination.as_str()
+    );
+    assert_ne!(adds[0]["deletionVector"], removes[0]["deletionVector"]);
+    assert_eq!(adds[0]["dataChange"], false);
+    assert_eq!(removes[0]["dataChange"], false);
+    Ok(())
+}
+
 /// On an adaptiveMetadata table, a remove naming a DV file as `'r'` cancels the add that named the
 /// same DV file as `'u'`: the file drops out of the scan, and the incremental scan reports the
 /// remove under the id that [`DeletionVectorDescriptor::unique_id_for`] derives for the add's DV.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[tokio::test]
 async fn adaptive_metadata_remove_cancels_add_across_dv_storage_types(
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     // v1: create an adaptiveMetadata table with one data file.
     let (_tmp_dir, table_url, engine, snapshot) =
         create_number_table(vec!["adaptiveMetadata-preview"], vec![], "id", true).await?;

@@ -908,9 +908,11 @@ reuses `ScanMetadataArrowResult` with null `transforms`.
 ## Write Flow
 
 Rust builders are aliases for `TransactionBuilder<CreateTable>` and
-`TransactionBuilder<UpdateTable>`. Keep their concrete opaque FFI descriptors and explicit
-`create_table_txn_builder_*` / `update_table_txn_builder_*` exports. Shared Rust setters do not imply
-a universal C handle; custom setters are exposed only for their applicable builder descriptor.
+`TransactionBuilder<UpdateTable>`; ALTER uses `TransactionBuilder<AlterTable<S>>`.
+Keep their concrete opaque FFI descriptors and explicit
+`create_table_txn_builder_*` / `update_table_txn_builder_*` / `alter_table_txn_builder_*` exports.
+Shared Rust setters do not imply a universal C handle; custom setters are exposed only for their
+applicable builder descriptor.
 Rust-only builder aliases carry `cbindgen:ignore` so header generation uses the descriptors rather
 than monomorphizing builder state.
 
@@ -935,7 +937,25 @@ after decoding the strings. Custom-name restrictions are validated at build. Cre
 constructors likewise require engine info and `data_change`, with the operation fixed to
 `CREATE TABLE`.
 
-`update_table_txn_commit()` and `create_table_txn_commit()` return a `Handle<ExclusiveCommittedTransaction>` that the caller can read via `committed_transaction_version` and `committed_transaction_post_commit_snapshot`, then must release with `free_committed_transaction`. The post-commit snapshot, when present, is a separate `SharedSnapshot` handle that must be freed with `free_snapshot`.
+`new_alter_table_txn_builder(snapshot, engine_info, engine)` fixes the operation to ALTER TABLE
+and data-change intent to false. Schema setters transition its opaque builder from Ready to
+Modifying; building without a schema operation returns an error. The resulting
+`ExclusiveAlterTableTransaction` supports late-bound commit information, operation metrics, and
+user domain additions before commit. It supports data-preserving file rewrites through
+`alter_table_txn_write_state`, `alter_table_txn_add_files`, and `alter_table_txn_remove_files`, plus
+deletion-vector relocation through `alter_table_txn_update_deletion_vectors`. These file APIs borrow
+the transaction through a pointer to its handle; input metadata, DV maps, and scan iterators are
+consumed on success and error. All Add and Remove actions use `dataChange=false`; the connector must
+preserve logical rows. Row-tracked rewrites require
+`alter_table_txn_ack_row_tracking_preservation`. Manifest APIs remain UPDATE-only.
+Common setters use the shared Rust implementation. Build consumes its builder and any supplied
+committer on success and error; transaction setters consume the transaction and return its
+replacement on success, dropping consumed inputs on error.
+
+The transaction commit functions return a `Handle<ExclusiveCommittedTransaction>` that the caller
+can read via `committed_transaction_version` and `committed_transaction_post_commit_snapshot`, then
+must release with `free_committed_transaction`. The post-commit snapshot, when present, is a separate
+`SharedSnapshot` handle that must be freed with `free_snapshot`.
 
 Transaction identifiers can be added before build with the `*_txn_builder_with_transaction_id`
 setters, or after build with `update_table_txn_with_transaction_id` /

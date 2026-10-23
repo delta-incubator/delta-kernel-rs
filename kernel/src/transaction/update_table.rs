@@ -1,7 +1,7 @@
 //! Update table transaction methods.
 //!
-//! This module contains staging APIs and deletion vector update logic for update-table
-//! transactions. Construction lives in [`builder::update_table`](super::builder::update_table).
+//! This module contains shared existing-table staging APIs and deletion vector logic.
+//! Construction lives in [`builder::update_table`](super::builder::update_table).
 //! See [`mod.rs`](super) for shared commit logic.
 
 use std::collections::HashMap;
@@ -16,7 +16,10 @@ use super::manifest_commit_state::ManifestCommitState;
 use super::root_manifest_file::RootManifestFile;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use super::ManifestWrite;
-use super::{ExecutionMode, Imperative, Transaction, UpdateTable};
+use super::{
+    ExecutionMode, ExistingTableBuilderState, Imperative, SupportsDataFiles, Transaction,
+    UpdateTable,
+};
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::actions::BackReference;
@@ -62,7 +65,11 @@ impl<MODE: ExecutionMode> Transaction<UpdateTable, MODE> {
         self.user_domain_removals.push(domain);
         self
     }
+}
 
+impl<STATE: SupportsDataFiles<BuilderState = ExistingTableBuilderState>, MODE: ExecutionMode>
+    Transaction<STATE, MODE>
+{
     /// Acknowledges that the connector correctly preserves Stable Row IDs and Stable Row Commit
     /// Versions. That is:
     ///
@@ -87,7 +94,9 @@ impl<MODE: ExecutionMode> Transaction<UpdateTable, MODE> {
     pub fn ack_row_tracking_preservation(&mut self) {
         self.row_tracking_preservation_acknowledged = true;
     }
+}
 
+impl<MODE: ExecutionMode> Transaction<UpdateTable, MODE> {
     /// Set an explicit row-tracking high-water mark for this transaction.
     ///
     /// Use this when row IDs must also be coordinated with another system. Kernel still assigns
@@ -195,10 +204,17 @@ impl Transaction<UpdateTable, Imperative> {
             )),
         }
     }
+}
 
+impl<STATE: SupportsDataFiles<BuilderState = ExistingTableBuilderState>>
+    Transaction<STATE, Imperative>
+{
     /// Remove files from the table in this transaction. This API generally enables the engine to
     /// delete data (at file-level granularity) from the table. Note that this API can be called
     /// multiple times to remove multiple batches.
+    ///
+    /// For ALTER transactions, replace removed files with files containing the same logical data.
+    /// Kernel does not inspect file contents to verify data preservation.
     ///
     /// The expected schema for `remove_metadata` is given by [`scan_row_schema`]. It is expected
     /// this will be the result of passing [`FilteredEngineData`] returned from a scan
@@ -249,11 +265,9 @@ impl Transaction<UpdateTable, Imperative> {
             .remove_files_metadata
             .push(remove_metadata);
     }
+}
 
-    // -------------------------------------------------------------------------
-    // Deletion vector updates
-    // -------------------------------------------------------------------------
-
+impl Transaction<UpdateTable, Imperative> {
     /// Helper function to convert scan metadata iterator to filtered engine data iterator.
     ///
     /// This adapter extracts the `scan_files` field from each [`crate::scan::ScanMetadata`] item,
@@ -274,7 +288,11 @@ impl Transaction<UpdateTable, Imperative> {
     ) -> impl KernelResultIterator<FilteredEngineData> {
         scan_metadata.map(|result| result.map(|metadata| metadata.scan_files))
     }
+}
 
+impl<STATE: SupportsDataFiles<BuilderState = ExistingTableBuilderState>>
+    Transaction<STATE, Imperative>
+{
     /// Update deletion vectors for files in the table.
     ///
     /// This method can be called multiple times to update deletion vectors for different sets of
@@ -289,6 +307,10 @@ impl Transaction<UpdateTable, Imperative> {
     /// or incorrect physical partition keys.
     ///
     /// On commit, each matched file's add action carries `stats.tightBounds: false`.
+    ///
+    /// ALTER transactions always use `dataChange = false`. Replacement descriptors must preserve
+    /// logical data, for example by relocating the same deletion bitmap. Kernel does not validate
+    /// bitmap equivalence.
     ///
     /// # Arguments
     ///
