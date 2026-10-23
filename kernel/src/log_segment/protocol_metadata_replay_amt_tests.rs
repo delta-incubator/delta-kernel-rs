@@ -388,11 +388,7 @@ async fn latest_checkpoint_action_without_replay_follows_commit_info_pointer() {
         table_root.as_str(),
         store.as_ref(),
         0,
-        format!(
-            "{}\n{}",
-            commit_info_line(Some((0, 0))),
-            checkpoint_commit(0, &[], one_column_schema())
-        ),
+        checkpoint_commit(0, &[], one_column_schema()),
     )
     .await
     .unwrap();
@@ -819,6 +815,8 @@ impl PlanExecutor for CountingPlanExecutor {
 // Replay still resolves P&M from the checkpoint and the newest commit's pointer without reading the
 // pointed commit, which is deleted here, but following the pointer to the action fails because the
 // segment does not list its commit.
+// TODO(#3683): once standalone checkpoints are supported, replay reads the checkpoint action from
+// the checkpoint file and this resolves.
 #[tokio::test]
 async fn standalone_checkpoint_above_pointed_commit_fails_to_read_its_action() {
     check_standalone_checkpoint_above_pointed_commit(non_plan_engine).await;
@@ -1048,11 +1046,7 @@ async fn latest_checkpoint_action_reads_commit_named_by_crc_pointer(
 async fn latest_checkpoint_action_fails_without_commit_or_crc_at_checkpoint_version() {
     let store = Arc::new(InMemory::new());
     let table_root = url::Url::parse("memory:///").unwrap();
-    let commit = format!(
-        "{}\n{}",
-        commit_info_line(Some((0, 0))),
-        checkpoint_commit(0, &[], one_column_schema())
-    );
+    let commit = checkpoint_commit(0, &[], one_column_schema());
     add_commit(table_root.as_str(), store.as_ref(), 0, commit)
         .await
         .unwrap();
@@ -1084,16 +1078,8 @@ async fn latest_checkpoint_action_follows_commit_info_pointer(
     let store = Arc::new(InMemory::new());
     let table_root = url::Url::parse("memory:///").unwrap();
     let commits = [
-        format!(
-            "{}\n{}",
-            commit_info_line(Some((0, 0))),
-            checkpoint_commit(0, &[], one_column_schema())
-        ),
-        format!(
-            "{}\n{}",
-            commit_info_line(Some((1, 1))),
-            checkpoint_commit(1, &[], one_column_schema())
-        ),
+        checkpoint_commit(0, &[], one_column_schema()),
+        checkpoint_commit(1, &[], one_column_schema()),
         format!(
             "{}\n{}",
             commit_info_line(pointer),
@@ -1160,11 +1146,7 @@ async fn post_commit_snapshot_resolves_latest_checkpoint_action(
         table_root.as_str(),
         store.as_ref(),
         0,
-        format!(
-            "{}\n{}",
-            serde_json::json!({ "commitInfo": { "timestamp": 1, "inCommitTimestamp": 1 } }),
-            checkpoint_commit(0, &[], one_column_schema()),
-        ),
+        checkpoint_commit(0, &[], one_column_schema()),
     )
     .await
     .unwrap();
@@ -1377,11 +1359,7 @@ async fn post_commit_snapshot_follows_transaction_last_manifest_commit() {
         table_root.as_str(),
         store.as_ref(),
         0,
-        format!(
-            "{}\n{}",
-            commit_info_line(Some((0, 0))),
-            checkpoint_commit(0, &[], one_column_schema())
-        ),
+        checkpoint_commit(0, &[], one_column_schema()),
     )
     .await
     .unwrap();
