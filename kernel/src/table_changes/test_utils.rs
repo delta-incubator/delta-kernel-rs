@@ -65,6 +65,9 @@ pub(crate) fn row_tracking_table_config(table_root: Url, schema: SchemaRef) -> T
         .build()
 }
 
+/// Replays commits with a read configuration fixed to mapping mode `None` and no partition
+/// columns. Tests for per-commit mapping or partition-layout validation must construct a real
+/// `TableChangesReadConfiguration` instead.
 pub(crate) fn replay_unmapped_unpartitioned_table_changes(
     engine: Arc<dyn Engine>,
     start_table_configuration: &TableConfiguration,

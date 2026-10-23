@@ -1248,7 +1248,6 @@ async fn file_meta_timestamp() {
         engine.as_ref(),
         &mut table_config,
         commit,
-        &get_schema(),
         &read_configuration,
         CdfMode::ChangeDataFeed,
     )
@@ -1538,7 +1537,6 @@ async fn test_timestamp_with_ict_enabled() {
         engine.as_ref(),
         &mut table_config,
         commit,
-        &get_schema(),
         &read_configuration,
         CdfMode::ChangeDataFeed,
     )
@@ -1591,7 +1589,6 @@ async fn test_timestamp_with_ict_disabled() {
         engine.as_ref(),
         &mut table_config,
         commit.clone(),
-        &get_schema(),
         &read_configuration,
         CdfMode::ChangeDataFeed,
     )
@@ -1651,7 +1648,6 @@ async fn test_timestamp_with_commit_info_not_first() {
         engine.as_ref(),
         &mut table_config,
         commit,
-        &get_schema(),
         &read_configuration,
         CdfMode::ChangeDataFeed,
     );

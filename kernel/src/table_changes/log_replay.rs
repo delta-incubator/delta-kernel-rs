@@ -74,7 +74,6 @@ pub(crate) fn table_changes_action_iter(
         })
         .map(Arc::new);
 
-    let table_schema = read_configuration.schema().clone();
     let read_configuration = read_configuration.clone();
     let mut current_configuration = start_table_configuration.clone();
     let result = commit_files
@@ -84,7 +83,6 @@ pub(crate) fn table_changes_action_iter(
                 engine.as_ref(),
                 &mut current_configuration,
                 commit_file,
-                &table_schema,
                 &read_configuration,
                 mode,
             )?;
@@ -161,10 +159,10 @@ impl LogReplayScanner {
         engine: &dyn Engine,
         table_configuration: &mut TableConfiguration,
         commit_file: ParsedLogPath,
-        table_schema: &SchemaRef,
         read_configuration: &TableChangesReadConfiguration,
         mode: CdfMode,
     ) -> KernelResult<Self> {
+        let table_schema = read_configuration.schema();
         let visitor_schema = PreparePhaseVisitor::schema();
 
         // Note: We do not perform data skipping yet because we need to visit all add and

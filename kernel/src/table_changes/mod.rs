@@ -391,10 +391,13 @@ impl TableChanges {
         let read_configuration =
             TableChangesReadConfiguration::new(end_snapshot.table_configuration());
         if !mode.schemas_compatible(start_schema.as_ref(), read_configuration.schema().as_ref()) {
-            return Err(KernelError::change_data_feed_incompatible_schema(
-                read_configuration.schema().as_ref(),
-                start_schema.as_ref(),
-            ));
+            return Err(
+                KernelError::change_data_feed_incompatible_schema_at_version(
+                    read_configuration.schema().as_ref(),
+                    start_schema.as_ref(),
+                    start_snapshot.version(),
+                ),
+            );
         }
         read_configuration.ensure_partition_columns_compatible(
             start_snapshot.table_configuration(),
@@ -560,7 +563,7 @@ impl TableChanges {
     }
 }
 
-/// Owns the end-version layout needed by lazy log replay.
+/// End-version schema and partition layout used to validate a change-feed range.
 #[derive(Debug, Clone)]
 struct TableChangesReadConfiguration {
     schema: SchemaRef,
@@ -603,6 +606,8 @@ impl TableChangesReadConfiguration {
         version: Version,
     ) -> KernelResult<()> {
         let candidate_mode = table_configuration.column_mapping_mode();
+        // `None -> Name` can preserve name-based resolution, but reject every mode transition here
+        // until compatibility is checked across the full physical schema.
         let mapping_modes_compatible = candidate_mode == self.column_mapping_mode;
         let logical_partition_columns_match = table_configuration.logical_partition_columns()
             == self.logical_partition_columns.as_slice();
@@ -630,7 +635,7 @@ impl TableChangesReadConfiguration {
         candidate_physical_partition_columns: &[String],
         version: Version,
     ) -> KernelError {
-        KernelError::ChangeDataFeedIncompatibleSchema(
+        KernelError::change_data_feed_incompatible_partition_layout(
             format!(
                 "schema: {}; column mapping mode: {:?}; logical partition columns: {:?}; \
                  physical partition columns: {:?}",
@@ -811,16 +816,25 @@ mod tests {
         ]
     }
 
-    fn assert_incompatible_schema_at_version<T>(result: KernelResult<T>, version: Version) {
-        let error = match result {
+    fn assert_incompatible_schema_at_version<T>(
+        result: KernelResult<T>,
+        version: Version,
+        expected_failure: ExpectedFailure,
+    ) {
+        let actual = match result {
+            Err(KernelError::ChangeDataFeedIncompatibleSchema(_, actual)) => actual,
             Ok(_) => panic!("expected an incompatible schema"),
-            Err(error) => error,
+            Err(error) => panic!("expected an incompatible schema, got {error:?}"),
         };
-        assert!(matches!(
-            error,
-            KernelError::ChangeDataFeedIncompatibleSchema(_, actual)
-                if actual.starts_with(&format!("schema at version {version}:"))
-        ));
+        assert!(
+            actual.starts_with(&format!("schema at version {version}:")),
+            "expected incompatibility at version {version}, got {actual}"
+        );
+        assert_eq!(
+            actual.contains("; column mapping mode: "),
+            expected_failure == ExpectedFailure::PartitionLayout,
+            "unexpected incompatibility details: {actual}"
+        );
     }
 
     struct PartitionLayout<'a> {
@@ -829,7 +843,7 @@ mod tests {
         physical_partition_columns: &'a [&'a str],
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     enum ExpectedFailure {
         Schema,
         PartitionLayout,
@@ -926,10 +940,7 @@ mod tests {
 
         // A field in the schema goes from being nullable to non-nullable
         let table_changes_res = TableChanges::try_new(url, engine.as_ref(), 3, Some(4));
-        assert_result_error_with_message(
-            table_changes_res,
-            "Change data feed encountered incompatible schema",
-        );
+        assert_incompatible_schema_at_version(table_changes_res, 3, ExpectedFailure::Schema);
     }
 
     #[test]
@@ -1057,13 +1068,7 @@ mod tests {
         let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
         let res =
             TableChanges::try_new_row_tracking_cdf_listing(table_root, engine.as_ref(), 1, Some(2));
-        assert!(
-            matches!(
-                &res,
-                Err(KernelError::ChangeDataFeedIncompatibleSchema(_, _))
-            ),
-            "expected an incompatible start schema to be rejected, got {res:?}"
-        );
+        assert_incompatible_schema_at_version(res, 1, ExpectedFailure::Schema);
     }
 
     #[rstest::rstest]
@@ -1110,13 +1115,9 @@ mod tests {
         let result =
             TableChanges::try_new_row_tracking_cdf_listing(table_root, engine.as_ref(), 0, Some(1));
         match expected_failure {
-            ExpectedFailure::Schema => assert!(
-                matches!(
-                    result,
-                    Err(KernelError::ChangeDataFeedIncompatibleSchema(_, _))
-                ),
-                "expected a schema incompatibility, got {result:?}"
-            ),
+            ExpectedFailure::Schema => {
+                assert_incompatible_schema_at_version(result, 0, ExpectedFailure::Schema);
+            }
             ExpectedFailure::PartitionLayout => {
                 assert_incompatible_partition_layout_at_version(
                     result,
@@ -1526,6 +1527,7 @@ mod tests {
         assert_incompatible_schema_at_version(
             collect_row_tracking_change_count(table_changes, engine),
             1,
+            ExpectedFailure::PartitionLayout,
         );
     }
 

@@ -179,7 +179,7 @@ impl TableChangesScan {
             &self.table_changes.read_configuration,
             commits,
             physical_predicate,
-            CdfMode::ChangeDataFeed,
+            self.table_changes.mode,
         )?;
         Ok(Some(it).into_iter().flatten())
     }

@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
-use delta_kernel::arrow::array::{RecordBatch, StringArray};
-use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+use delta_kernel::arrow::array::RecordBatch;
+use delta_kernel::arrow::datatypes::Schema as ArrowSchema;
 use delta_kernel::arrow::util::pretty::pretty_format_batches;
 use delta_kernel::engine::arrow_conversion::TryFromKernel as _;
 use delta_kernel::engine::arrow_data::EngineDataArrowExt as _;
 use delta_kernel::expressions::{col, lit, Predicate as Pred};
-use delta_kernel::object_store::path::Path as ObjectStorePath;
-use delta_kernel::object_store::ObjectStoreExt as _;
 use delta_kernel::schema::{schema_ref, DataType, SchemaRef};
 use delta_kernel::table_changes::TableChanges;
+use delta_kernel::table_features::ColumnMappingMode;
 use delta_kernel::{Engine, KernelError, KernelResult, PredicateRef, Version};
 use itertools::Itertools;
 use rstest::rstest;
@@ -18,7 +17,6 @@ use test_utils::column_mapping_fixtures::cm_field;
 use test_utils::{
     add_commit, assert_result_error_with_message, create_default_engine,
     create_default_engine_with_batch, create_table, engine_store_setup, load_test_data,
-    record_batch_to_bytes,
 };
 use url::Url;
 
@@ -77,64 +75,61 @@ fn read_cdf_for_table_with_batch_size(
     Ok(batches)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CdfColumnMappingMode {
-    None,
-    Name,
-}
-
-fn cdf_partition_evolution_schema(column_mapping_mode: CdfColumnMappingMode) -> SchemaRef {
-    if column_mapping_mode == CdfColumnMappingMode::Name {
-        schema_ref! {
-            (cm_field("id", 1, "id", DataType::INTEGER)),
-            (cm_field("name", 2, "name", DataType::STRING)),
-        }
-    } else {
-        schema_ref! {
+fn cdf_partition_evolution_schema(column_mapping_mode: ColumnMappingMode) -> SchemaRef {
+    match column_mapping_mode {
+        ColumnMappingMode::None => schema_ref! {
             nullable "id": INTEGER,
             nullable "name": STRING,
-        }
+        },
+        ColumnMappingMode::Name | ColumnMappingMode::Id => schema_ref! {
+            (cm_field("id", 1, "id", DataType::INTEGER)),
+            (cm_field("name", 2, "name", DataType::STRING)),
+        },
     }
 }
 
-fn cdf_protocol_action(column_mapping_mode: CdfColumnMappingMode) -> Value {
-    if column_mapping_mode == CdfColumnMappingMode::Name {
-        json!({
+fn cdf_protocol_action(column_mapping_mode: ColumnMappingMode) -> Value {
+    match column_mapping_mode {
+        ColumnMappingMode::None => json!({
+            "protocol": {
+                "minReaderVersion": 1,
+                "minWriterVersion": 4,
+            }
+        }),
+        ColumnMappingMode::Name | ColumnMappingMode::Id => json!({
             "protocol": {
                 "minReaderVersion": 3,
                 "minWriterVersion": 7,
                 "readerFeatures": ["columnMapping"],
                 "writerFeatures": ["columnMapping", "changeDataFeed"],
             }
-        })
-    } else {
-        json!({
-            "protocol": {
-                "minReaderVersion": 1,
-                "minWriterVersion": 4,
-            }
-        })
+        }),
     }
 }
 
 fn cdf_metadata_action(
     schema: &SchemaRef,
     partition_columns: &[&str],
-    column_mapping_mode: CdfColumnMappingMode,
+    column_mapping_mode: ColumnMappingMode,
 ) -> Value {
     let mut configuration = serde_json::Map::from_iter([(
         "delta.enableChangeDataFeed".to_owned(),
         Value::String("true".to_owned()),
     )]);
-    if column_mapping_mode == CdfColumnMappingMode::Name {
+    if column_mapping_mode != ColumnMappingMode::None {
+        let max_column_id = schema
+            .fields()
+            .filter_map(|field| field.column_mapping_id())
+            .max()
+            .expect("mapped fixture schema has column IDs");
         configuration.extend([
             (
                 "delta.columnMapping.mode".to_owned(),
-                Value::String("name".to_owned()),
+                json!(column_mapping_mode),
             ),
             (
                 "delta.columnMapping.maxColumnId".to_owned(),
-                Value::String("2".to_owned()),
+                Value::String(max_column_id.to_string()),
             ),
         ]);
     }
@@ -157,7 +152,7 @@ async fn add_cdf_metadata_commit(
     version: Version,
     schema: &SchemaRef,
     partition_columns: &[&str],
-    column_mapping_mode: CdfColumnMappingMode,
+    column_mapping_mode: ColumnMappingMode,
 ) -> KernelResult<()> {
     let mut actions = Vec::new();
     if version == 0 {
@@ -173,30 +168,6 @@ async fn add_cdf_metadata_commit(
         .map(|action| action.to_string())
         .join("\n");
     add_commit(table_url.as_str(), store, version, commit).await
-}
-
-async fn write_single_string_parquet(
-    store: &delta_kernel::object_store::DynObjectStore,
-    table_url: &Url,
-    path: &str,
-    column_name: &str,
-    value: &str,
-) -> KernelResult<usize> {
-    let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-        column_name,
-        ArrowDataType::Utf8,
-        true,
-    )]));
-    let batch = RecordBatch::try_new(
-        arrow_schema,
-        vec![Arc::new(StringArray::from(vec![Some(value)]))],
-    )?;
-    let parquet_data = record_batch_to_bytes(&batch);
-    let parquet_size = parquet_data.len();
-    let data_url = table_url.join(path)?;
-    let data_path = ObjectStorePath::from_url_path(data_url.path())?;
-    store.put(&data_path, parquet_data.into()).await?;
-    Ok(parquet_size)
 }
 
 fn collect_empty_cdf(table_changes: TableChanges, engine: Arc<dyn Engine>) -> KernelResult<usize> {
@@ -607,80 +578,15 @@ fn partition_table() -> KernelResult<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn cdf_rejects_unmapped_partition_layout_change_with_data_files() -> KernelResult<()> {
-    let (store, engine, table_url) = engine_store_setup("cdf_real_unmapped_partition_change", None);
-    let schema = schema_ref! {
-        nullable "a": STRING,
-        nullable "b": STRING,
-    };
-    let old_path = "b=B0/old.parquet";
-    let new_path = "a=A1/new.parquet";
-    let old_size =
-        write_single_string_parquet(store.as_ref(), &table_url, old_path, "a", "A0").await?;
-    let new_size =
-        write_single_string_parquet(store.as_ref(), &table_url, new_path, "b", "B1").await?;
-
-    let commit_0 = [
-        cdf_protocol_action(CdfColumnMappingMode::None),
-        cdf_metadata_action(&schema, &["b"], CdfColumnMappingMode::None),
-        json!({
-            "add": {
-                "path": old_path,
-                "partitionValues": { "b": "B0" },
-                "size": old_size,
-                "modificationTime": 1_700_000_000_000i64,
-                "dataChange": true,
-            }
-        }),
-    ]
-    .into_iter()
-    .map(|action| action.to_string())
-    .join("\n");
-    add_commit(table_url.as_str(), store.as_ref(), 0, commit_0).await?;
-
-    let commit_1 = [
-        cdf_metadata_action(&schema, &["a"], CdfColumnMappingMode::None),
-        json!({
-            "remove": {
-                "path": old_path,
-                "deletionTimestamp": 1_700_000_001_000i64,
-                "dataChange": true,
-                "extendedFileMetadata": true,
-                "partitionValues": { "b": "B0" },
-                "size": old_size,
-            }
-        }),
-        json!({
-            "add": {
-                "path": new_path,
-                "partitionValues": { "a": "A1" },
-                "size": new_size,
-                "modificationTime": 1_700_000_001_000i64,
-                "dataChange": true,
-            }
-        }),
-    ]
-    .into_iter()
-    .map(|action| action.to_string())
-    .join("\n");
-    add_commit(table_url.as_str(), store.as_ref(), 1, commit_1).await?;
-
-    assert_result_error_with_message(
-        TableChanges::try_new(table_url, &engine, 0, Some(1)),
-        "Change data feed encountered incompatible schema",
-    );
-    Ok(())
-}
-
 #[rstest]
 #[case::added(&[], &["id"])]
 #[case::removed(&["id"], &[])]
 #[case::reordered(&["id", "name"], &["name", "id"])]
+#[case::swapped(&["id"], &["name"])]
 #[tokio::test]
 async fn cdf_rejects_partition_column_changes(
-    #[values(CdfColumnMappingMode::None, CdfColumnMappingMode::Name)]
-    column_mapping_mode: CdfColumnMappingMode,
+    #[values(ColumnMappingMode::None, ColumnMappingMode::Name)]
+    column_mapping_mode: ColumnMappingMode,
     #[case] initial_partition_columns: &[&str],
     #[case] read_partition_columns: &[&str],
 ) -> KernelResult<()> {
@@ -717,20 +623,20 @@ async fn cdf_rejects_partition_column_changes(
 #[case::removed(&["id"], &[])]
 #[case::reordered(&["id", "name"], &["name", "id"])]
 #[tokio::test]
-async fn cdf_uses_mapped_partition_layout_at_start_version(
+async fn cdf_accepts_partition_layout_change_introduced_at_start_version(
     #[case] initial_partition_columns: &[&str],
     #[case] read_partition_columns: &[&str],
 ) -> KernelResult<()> {
     let (store, engine, table_url) = engine_store_setup("cdf_partition_change_at_start", None);
     let engine: Arc<dyn Engine> = Arc::new(engine);
-    let schema = cdf_partition_evolution_schema(CdfColumnMappingMode::Name);
+    let schema = cdf_partition_evolution_schema(ColumnMappingMode::Name);
     add_cdf_metadata_commit(
         store.as_ref(),
         &table_url,
         0,
         &schema,
         initial_partition_columns,
-        CdfColumnMappingMode::Name,
+        ColumnMappingMode::Name,
     )
     .await?;
     add_cdf_metadata_commit(
@@ -739,7 +645,7 @@ async fn cdf_uses_mapped_partition_layout_at_start_version(
         1,
         &schema,
         read_partition_columns,
-        CdfColumnMappingMode::Name,
+        ColumnMappingMode::Name,
     )
     .await?;
 
@@ -749,11 +655,11 @@ async fn cdf_uses_mapped_partition_layout_at_start_version(
 }
 
 #[rstest]
-#[case::without_mapping(CdfColumnMappingMode::None)]
-#[case::with_mapping(CdfColumnMappingMode::Name)]
+#[case::without_mapping(ColumnMappingMode::None)]
+#[case::with_mapping(ColumnMappingMode::Name)]
 #[tokio::test]
 async fn cdf_rejects_intermediate_partition_column_changes(
-    #[case] column_mapping_mode: CdfColumnMappingMode,
+    #[case] column_mapping_mode: ColumnMappingMode,
 ) -> KernelResult<()> {
     let (store, engine, table_url) = engine_store_setup("cdf_intermediate_partition_changes", None);
     let engine = Arc::new(engine);
@@ -801,7 +707,7 @@ async fn cdf_rejects_intermediate_partition_column_changes(
 #[tokio::test]
 async fn cdf_rejects_partition_column_type_changes_without_mapping() -> KernelResult<()> {
     let (store, engine, table_url) = engine_store_setup("cdf_partition_column_type_change", None);
-    let initial_schema = cdf_partition_evolution_schema(CdfColumnMappingMode::None);
+    let initial_schema = cdf_partition_evolution_schema(ColumnMappingMode::None);
     let read_schema = schema_ref! {
         nullable "id": LONG,
         nullable "name": STRING,
@@ -812,7 +718,7 @@ async fn cdf_rejects_partition_column_type_changes_without_mapping() -> KernelRe
         0,
         &initial_schema,
         &["id"],
-        CdfColumnMappingMode::None,
+        ColumnMappingMode::None,
     )
     .await?;
     add_cdf_metadata_commit(
@@ -821,7 +727,7 @@ async fn cdf_rejects_partition_column_type_changes_without_mapping() -> KernelRe
         1,
         &read_schema,
         &["id"],
-        CdfColumnMappingMode::None,
+        ColumnMappingMode::None,
     )
     .await?;
 
