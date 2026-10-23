@@ -417,7 +417,7 @@ pub struct ScanBuilder {
     stats: StatsOptions,
     correlation_id: Option<Arc<str>>,
     without_row_transforms: bool,
-    partition_values: PartitionValuesOptions,
+    partition_values_options: PartitionValuesOptions,
     cancellation_token: Option<CancellationTokenRef>,
 }
 
@@ -429,7 +429,7 @@ impl std::fmt::Debug for ScanBuilder {
             .field("stats", &self.stats)
             .field("correlation_id", &self.correlation_id)
             .field("without_row_transforms", &self.without_row_transforms)
-            .field("partition_values", &self.partition_values)
+            .field("partition_values_options", &self.partition_values_options)
             .finish()
     }
 }
@@ -444,7 +444,7 @@ impl ScanBuilder {
             stats: StatsOptions::default(),
             correlation_id: None,
             without_row_transforms: false,
-            partition_values: PartitionValuesOptions::default(),
+            partition_values_options: PartitionValuesOptions::default(),
             cancellation_token: None,
         }
     }
@@ -555,7 +555,7 @@ impl ScanBuilder {
         mut self,
         partition_values_options: PartitionValuesOptions,
     ) -> Self {
-        self.partition_values = partition_values_options;
+        self.partition_values_options = partition_values_options;
         self
     }
 
@@ -614,7 +614,7 @@ impl ScanBuilder {
             self.snapshot.table_configuration(),
             self.predicate,
             &self.stats,
-            &self.partition_values,
+            &self.partition_values_options,
             (), // No classifier, default is for scans
         )?;
 
@@ -623,7 +623,7 @@ impl ScanBuilder {
         state_info.skip_row_transforms = self.without_row_transforms
             || table_requires_timestamp_timezone_support(
                 self.snapshot.table_configuration(),
-                &self.partition_values,
+                &self.partition_values_options,
             );
 
         let commits_since_checkpoint = self.snapshot.log_segment().commits_since_checkpoint();
@@ -642,7 +642,7 @@ impl ScanBuilder {
             state_info: Arc::new(state_info),
             stats: self.stats,
             correlation_id: self.correlation_id,
-            partition_values: self.partition_values,
+            partition_values: self.partition_values_options,
             cancellation_token: self.cancellation_token,
         })
     }

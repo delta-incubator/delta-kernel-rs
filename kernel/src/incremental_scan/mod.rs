@@ -218,9 +218,10 @@ impl IncrementalScanBuilder {
                 // `add.partitionValues`, then skip against the shared `DataSkippingFilter`.
                 // `None` (predicate ineligible for skipping) degrades to keep-all.
                 //
-                // Pass the timezone to MapToStruct unconditionally to avoid type-specific branches.
-                // Invalid timezones therefore fail data skipping when a partition expression is
-                // evaluated, even for predicates on non-TIMESTAMP partition columns.
+                // Here we pass the timezone to MapToStruct unconditionally, even if the predicate
+                // does not reference a TIMESTAMP partition column. As a result, data skipping fails
+                // for an invalid timezone whenever it evaluates a predicate on any partition
+                // column. This is an intentional choice to reduce branches.
                 let filter = DataSkippingFilter::for_raw_action_batch(
                     engine,
                     physical_predicate,
