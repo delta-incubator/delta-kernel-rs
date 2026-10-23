@@ -292,13 +292,11 @@ fn cancelled_snapshot_reports_correlated_failure_with_metered_handlers(
 /// Checks nested read overrides, cumulative HEAD preflight, and unscoped storage writes.
 #[test]
 fn nested_reads_override_tokens_but_head_checks_each_wrapper_and_writes_stay_unscoped() {
-    let engine = SyncEngine::new();
+    let reads = RecordingReads::new(None);
+    let engine = reads.engine();
     let cancelled: CancellationTokenRef = Arc::new(TestCancellationToken::cancelled());
     let cancelled_engine = CancellableEngine::new(&engine, cancelled);
-    let rebound_engine = CancellableEngine::new(
-        &cancelled_engine,
-        Arc::new(TestCancellationToken::default()),
-    );
+    let rebound_engine = CancellableEngine::new(&cancelled_engine, reads.token.clone());
     start_read(&rebound_engine, Read::Json, ReadApi::Default, None)
         .unwrap()
         .next()
@@ -311,7 +309,7 @@ fn nested_reads_override_tokens_but_head_checks_each_wrapper_and_writes_stay_uns
         .storage_handler()
         .put(&path, Bytes::from_static(b"data"), false)
         .unwrap();
-    let live_engine = CancellableEngine::new(&engine, Arc::new(TestCancellationToken::default()));
+    let live_engine = CancellableEngine::new(&engine, reads.token.clone());
     let metadata = live_engine.storage_handler().head(&path).unwrap();
     assert_eq!(metadata.location, path);
     assert_eq!(metadata.size, 4);
@@ -324,7 +322,8 @@ fn nested_reads_override_tokens_but_head_checks_each_wrapper_and_writes_stay_uns
         Err(KernelError::Cancelled)
     ));
     assert_eq!(
-        engine
+        reads
+            .inner
             .storage_handler()
             .read_files(vec![(path.clone(), None)])
             .unwrap()
@@ -352,11 +351,12 @@ fn copy_atomic_forwards_arguments_and_result(
     });
     let original =
         DelegatingEngine::new(Arc::new(SyncEngine::new())).with_storage_handler(storage.clone());
-    let token = Arc::new(TestCancellationToken::default());
+    let mut reads = RecordingReads::new(None);
+    Arc::get_mut(&mut reads).unwrap().inner = Arc::new(original);
     if cancelled {
-        token.cancel();
+        reads.token.cancel();
     }
-    let engine = CancellableEngine::new(&original, token);
+    let engine = CancellableEngine::new(&reads.engine(), reads.token.clone());
     let src = Url::parse("memory:///source").unwrap();
     let dest = Url::parse("memory:///destination").unwrap();
     let result = engine.storage_handler().copy_atomic(&src, &dest);
@@ -397,12 +397,13 @@ impl StorageHandler for RecordingCopy {
 /// Round-trips parsed JSON and Parquet writes even when the read token is cancelled.
 #[rstest]
 fn parsing_and_writes_ignore_read_cancellation(#[values(false, true)] cancelled: bool) {
-    let original = SyncEngine::new();
-    let token = Arc::new(TestCancellationToken::default());
+    let mut reads = RecordingReads::new(None);
+    Arc::get_mut(&mut reads).unwrap().expected_token = None;
+    let original = reads.engine();
     if cancelled {
-        token.cancel();
+        reads.token.cancel();
     }
-    let engine = CancellableEngine::new(&original, token);
+    let engine = CancellableEngine::new(&original, reads.token.clone());
     let schema = schema_ref! { nullable "id": INTEGER };
     let data = || {
         engine
