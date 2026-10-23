@@ -3,7 +3,7 @@
 
 use delta_kernel::committer::FileSystemCommitter;
 use delta_kernel::object_store::local::LocalFileSystem;
-use delta_kernel::schema::{schema_ref, DataType, SchemaRef, StructField};
+use delta_kernel::schema::{schema_ref, DataType, StructField};
 use delta_kernel::table_properties::CheckConstraint;
 use delta_kernel::transaction::{Transaction, UpdateTableOperation};
 use delta_kernel::{Engine, KernelError, KernelResult, Snapshot, SnapshotRef};
@@ -18,29 +18,23 @@ const CHECK_CONSTRAINTS_FEATURE: &[&str] = &["checkConstraints"];
 const POSITIVE_AMOUNT: &[(&str, &str)] = &[("positive_amount", "amount > 0")];
 
 /// The operation whose CHECK-constraint acknowledgement gate is under test.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum GatedOp {
     CommitWithData,
+    RemoveOnlyCommit,
     MetadataOnlyCommit,
     WriteState,
 }
 
-fn test_schema() -> SchemaRef {
-    schema_ref! {
-        nullable "amount": LONG,
-        nullable "name": STRING,
-    }
-}
-
 /// Builds a data-changing write transaction on `snapshot`.
-fn write_txn(snapshot: &SnapshotRef, engine: &dyn Engine) -> KernelResult<Transaction> {
+fn build_write_txn(snapshot: &SnapshotRef, engine: &dyn Engine) -> KernelResult<Transaction> {
     snapshot
         .clone()
         .update_table(UpdateTableOperation::Write, "Test/1.0", true)
         .build(engine, Box::new(FileSystemCommitter::new()))
 }
 
-fn stage_one_file(txn: &mut Transaction) -> KernelResult<(), Box<dyn std::error::Error>> {
+fn stage_one_file(txn: &mut Transaction) -> KernelResult<()> {
     let add = create_add_files_metadata(
         txn.add_files_schema(),
         vec![("part-00000.parquet", 1024, 1_000_000, Some(1))],
@@ -52,7 +46,10 @@ fn stage_one_file(txn: &mut Transaction) -> KernelResult<(), Box<dyn std::error:
 /// Asserts `result` failed with the acknowledgement gate error.
 fn assert_gate_error<T: std::fmt::Debug>(result: KernelResult<T>) {
     let err = result.expect_err("acknowledgement gate must reject this operation");
-    let is_gate_error = matches!(err, KernelError::InvalidTransactionState(_));
+    let is_gate_error = matches!(
+        &err,
+        KernelError::InvalidTransactionState(msg) if msg.contains("ack_check_constraints")
+    );
     assert!(
         is_gate_error,
         "expected the acknowledgement gate error, got: {err:?}"
@@ -60,7 +57,7 @@ fn assert_gate_error<T: std::fmt::Debug>(result: KernelResult<T>) {
 }
 
 /// The `(name, raw_sql)` pairs of `constraints`, in order.
-fn discovered(constraints: &[CheckConstraint]) -> Vec<(&str, &str)> {
+fn constraint_pairs(constraints: &[CheckConstraint]) -> Vec<(&str, &str)> {
     constraints
         .iter()
         .map(|constraint| (constraint.name(), constraint.raw_sql()))
@@ -74,8 +71,12 @@ async fn write_table(
     table_path: &str,
     writer_features: &[&str],
     constraints: &[(&str, &str)],
-) -> KernelResult<Url, Box<dyn std::error::Error>> {
+) -> KernelResult<Url> {
     let table_url = Url::from_directory_path(table_path).expect("table path must be a URL");
+    let schema = schema_ref! {
+        nullable "amount": LONG,
+        nullable "name": STRING,
+    };
     let configuration: serde_json::Map<String, serde_json::Value> = constraints
         .iter()
         .map(|(name, sql)| (format!("delta.constraints.{name}"), json!(sql)))
@@ -89,7 +90,7 @@ async fn write_table(
     let metadata = json!({"metaData": {
         "id": "test-id",
         "format": {"provider": "parquet", "options": {}},
-        "schemaString": serde_json::to_string(test_schema().as_ref())?,
+        "schemaString": serde_json::to_string(schema.as_ref())?,
         "partitionColumns": [],
         "configuration": configuration,
         "createdTime": 1_700_000_000_000_i64,
@@ -104,70 +105,92 @@ async fn write_table(
     Ok(table_url)
 }
 
-#[tokio::test]
-async fn discovers_constraints_from_snapshot_and_transaction(
-) -> KernelResult<(), Box<dyn std::error::Error>> {
-    let (_tmp, table_path, engine) = test_table_setup()?;
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_and_transaction_return_stored_constraints_in_name_order(
+    #[values(false, true)] checkpoint: bool,
+) -> KernelResult<()> {
+    let (_tmp, table_path, engine) = test_table_setup_mt()?;
     let constraints = [
-        ("positive_amount", "amount > 0"),
         ("NonEmptyName", "name != ''"),
+        ("positive_amount", "amount > 0"),
     ];
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, &constraints).await?;
 
-    // Discovery keeps the stored name case, sorts by name, and needs no acknowledgement.
-    let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let from_snapshot = discovered(snapshot.check_constraints());
-    let expected = [
-        ("NonEmptyName", "name != ''"),
-        ("positive_amount", "amount > 0"),
-    ];
-    assert_eq!(from_snapshot, expected);
+    let mut snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
+    if checkpoint {
+        snapshot.checkpoint(engine.as_ref(), None)?;
+        // A reloaded snapshot reads Metadata from the checkpoint instead of the commit.
+        snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
+    }
+    let from_snapshot = constraint_pairs(snapshot.check_constraints());
+    assert_eq!(from_snapshot, constraints);
 
-    let txn = write_txn(&snapshot, engine.as_ref())?;
-    let from_txn = discovered(txn.check_constraints());
-    assert_eq!(from_txn, expected);
+    let mut txn = build_write_txn(&snapshot, engine.as_ref())?;
+    let from_txn = constraint_pairs(txn.check_constraints());
+    assert_eq!(from_txn, constraints);
+
+    stage_one_file(&mut txn)?;
+    assert_gate_error(txn.commit(engine.as_ref()));
     Ok(())
 }
 
 #[rstest]
 #[tokio::test]
-async fn constrained_table_write_requires_acknowledgement(
+async fn write_state_and_commits_succeed_only_with_constraint_acknowledgement(
     #[values(
         GatedOp::CommitWithData,
+        GatedOp::RemoveOnlyCommit,
         GatedOp::MetadataOnlyCommit,
         GatedOp::WriteState
     )]
     op: GatedOp,
     #[values(true, false)] acknowledge: bool,
     #[values(true, false)] discover_first: bool,
-) -> KernelResult<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
 
-    let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let mut txn = write_txn(&snapshot, engine.as_ref())?;
+    let mut snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
+    if op == GatedOp::RemoveOnlyCommit {
+        let mut seed_txn = build_write_txn(&snapshot, engine.as_ref())?;
+        seed_txn.ack_check_constraints();
+        stage_one_file(&mut seed_txn)?;
+        snapshot = seed_txn
+            .commit(engine.as_ref())?
+            .unwrap_post_commit_snapshot();
+    }
+
+    let mut txn = build_write_txn(&snapshot, engine.as_ref())?;
     // Discovery alone must not count as an acknowledgement.
     if discover_first {
-        let _discovered = txn.check_constraints();
+        let _constraints = txn.check_constraints();
     }
     if acknowledge {
         txn.ack_check_constraints();
     }
+    let mut txn = txn
+        .with_transaction_id("app_id".to_string(), 1)
+        .with_operation_metrics([("numFiles", Some("1"))]);
 
-    let result = match op {
-        GatedOp::CommitWithData => {
-            stage_one_file(&mut txn)?;
-            txn.commit(engine.as_ref()).map(|committed| {
-                let _committed = committed.unwrap_committed();
-            })
+    match op {
+        GatedOp::CommitWithData => stage_one_file(&mut txn)?,
+        GatedOp::RemoveOnlyCommit => {
+            let scan_files = get_scan_files(snapshot.clone(), engine.as_ref())?;
+            let found_files = !scan_files.is_empty();
+            assert!(found_files);
+            for scan_file in scan_files {
+                txn.remove_files(scan_file);
+            }
         }
-        GatedOp::MetadataOnlyCommit => txn
-            .with_transaction_id("app_id".to_string(), 1)
-            .commit(engine.as_ref())
-            .map(|committed| {
-                let _committed = committed.unwrap_committed();
-            }),
-        GatedOp::WriteState => txn.write_state().map(|_write_state| ()),
+        GatedOp::MetadataOnlyCommit | GatedOp::WriteState => {}
+    }
+    let result = if op == GatedOp::WriteState {
+        txn.write_state().map(|_write_state| ())
+    } else {
+        txn.commit(engine.as_ref()).map(|committed| {
+            let _committed = committed.unwrap_committed();
+        })
     };
     if acknowledge {
         result?;
@@ -177,106 +200,16 @@ async fn constrained_table_write_requires_acknowledgement(
     Ok(())
 }
 
-#[rstest]
 #[tokio::test]
-async fn data_commit_to_table_without_constraints_needs_no_acknowledgement(
-    #[values(&[][..], CHECK_CONSTRAINTS_FEATURE)] writer_features: &[&str],
-) -> KernelResult<(), Box<dyn std::error::Error>> {
-    let (_tmp, table_path, engine) = test_table_setup()?;
-    let table_url = write_table(&table_path, writer_features, &[]).await?;
-
-    let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let from_snapshot = discovered(snapshot.check_constraints());
-    assert!(from_snapshot.is_empty());
-
-    let mut txn = write_txn(&snapshot, engine.as_ref())?;
-    stage_one_file(&mut txn)?;
-    txn.commit(engine.as_ref())?.unwrap_committed();
-    Ok(())
-}
-
-#[rstest]
-#[tokio::test]
-async fn remove_only_commit_on_constrained_table_requires_acknowledgement(
-    #[values(true, false)] acknowledge: bool,
-) -> KernelResult<(), Box<dyn std::error::Error>> {
-    let (_tmp, table_path, engine) = test_table_setup()?;
-    let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
-
-    let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let mut add_txn = write_txn(&snapshot, engine.as_ref())?;
-    add_txn.ack_check_constraints();
-    stage_one_file(&mut add_txn)?;
-    let snapshot = add_txn
-        .commit(engine.as_ref())?
-        .unwrap_post_commit_snapshot();
-
-    let scan_files = get_scan_files(snapshot.clone(), engine.as_ref())?;
-    let mut remove_txn = write_txn(&snapshot, engine.as_ref())?;
-    for scan_file in scan_files {
-        remove_txn.remove_files(scan_file);
-    }
-    if acknowledge {
-        remove_txn.ack_check_constraints();
-    }
-
-    let result = remove_txn.commit(engine.as_ref());
-    if acknowledge {
-        result?.unwrap_committed();
-    } else {
-        assert_gate_error(result);
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn discovers_constraints_after_checkpoint() -> KernelResult<(), Box<dyn std::error::Error>> {
-    let (_tmp, table_path, engine) = test_table_setup_mt()?;
-    let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
-
-    let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
-    snapshot.checkpoint(engine.as_ref(), None)?;
-
-    // A fresh snapshot reads Metadata from the checkpoint (via the `_last_checkpoint` hint), so
-    // discovery and the ack gate must still see the constraint.
-    let reloaded = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let from_reloaded = discovered(reloaded.check_constraints());
-    assert_eq!(from_reloaded, POSITIVE_AMOUNT);
-
-    let mut txn = write_txn(&reloaded, engine.as_ref())?;
-    stage_one_file(&mut txn)?;
-    assert_gate_error(txn.commit(engine.as_ref()));
-    Ok(())
-}
-
-#[tokio::test]
-async fn acknowledgement_survives_later_builder_calls(
-) -> KernelResult<(), Box<dyn std::error::Error>> {
-    let (_tmp, table_path, engine) = test_table_setup()?;
-    let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
-
-    let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let mut txn = write_txn(&snapshot, engine.as_ref())?;
-    txn.ack_check_constraints();
-    let mut txn = txn
-        .with_transaction_id("app_id".to_string(), 1)
-        .with_operation_metrics([("numFiles", Some("1"))]);
-    stage_one_file(&mut txn)?;
-    txn.commit(engine.as_ref())?.unwrap_committed();
-    Ok(())
-}
-
-#[tokio::test]
-async fn table_with_constraints_but_without_feature_is_readable_but_not_writable(
-) -> KernelResult<(), Box<dyn std::error::Error>> {
+async fn constraints_without_feature_are_discoverable_but_txn_build_fails() -> KernelResult<()> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, &[], POSITIVE_AMOUNT).await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let from_snapshot = discovered(snapshot.check_constraints());
+    let from_snapshot = constraint_pairs(snapshot.check_constraints());
     assert_eq!(from_snapshot, POSITIVE_AMOUNT);
 
-    let result = write_txn(&snapshot, engine.as_ref());
+    let result = build_write_txn(&snapshot, engine.as_ref());
     let rejected_as_malformed = matches!(result, Err(KernelError::InvalidProtocol(_)));
     assert!(rejected_as_malformed);
     Ok(())
@@ -284,9 +217,9 @@ async fn table_with_constraints_but_without_feature_is_readable_but_not_writable
 
 #[rstest]
 #[tokio::test]
-async fn alter_table_on_constrained_table_requires_acknowledgement(
+async fn alter_table_commit_succeeds_only_with_ack_and_keeps_constraints(
     #[values(true, false)] acknowledge: bool,
-) -> KernelResult<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
 
@@ -302,7 +235,7 @@ async fn alter_table_on_constrained_table_requires_acknowledgement(
 
     txn.ack_check_constraints();
     let altered = txn.commit(engine.as_ref())?.unwrap_post_commit_snapshot();
-    let from_altered = discovered(altered.check_constraints());
+    let from_altered = constraint_pairs(altered.check_constraints());
     assert_eq!(from_altered, POSITIVE_AMOUNT);
     Ok(())
 }
