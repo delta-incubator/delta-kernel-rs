@@ -1113,10 +1113,7 @@ mod tests {
         assert_extern_result_error_with_message(
             result,
             FFIKernelError::CommitRangeError,
-            Some(
-                "Commit range error: Commit action iteration requires commit range validation to \
-                 be enabled",
-            ),
+            Some("Commit range error: Commit action iteration is not supported for this range"),
         );
 
         unsafe { free_commit_range(range) }
