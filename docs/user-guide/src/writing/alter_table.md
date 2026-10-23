@@ -43,7 +43,9 @@ For a rewrite that preserves logical data, select the data operation, such as
 > [!NOTE]
 > The supported operations are adding columns and making columns nullable. Other schema operations
 > (drop column, rename, type changes) are not yet available through the
-> transaction builder.
+> transaction builder. With the experimental `check-constraints-in-dev` Cargo feature, the builder
+> can also add and drop CHECK constraints. See
+> [Check constraints](./check_constraints.md#adding-and-dropping-constraints).
 
 ## Adding a column
 
@@ -94,6 +96,9 @@ After this commit, the table schema has four fields. Existing rows for Alice,
 Bob, and Carol read back `NULL` for `country`. New writes can populate the
 column by including it in the `RecordBatch` they pass to
 `engine.write_parquet()`.
+
+If the table declares CHECK constraints, acknowledge that your connector enforces them before you
+commit. See [Check constraints](./check_constraints.md) for the acknowledgement.
 
 ## Validation rules
 
