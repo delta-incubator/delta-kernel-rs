@@ -44,7 +44,7 @@ impl StagedDataValidator {
 ///
 /// NOTE: Currently, Kernel doesn't require connectors to set dataChange for staged addFile.
 /// TODO(2869): Add intent-based validation for dataChange.
-pub(crate) struct MandatoryAddFileValidation {
+struct MandatoryAddFileValidation {
     physical_partition_columns: HashSet<String>,
 }
 
