@@ -1166,9 +1166,8 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         Ok(())
     }
 
-    /// Rejects writing to or committing to a table with CHECK constraints when the connector has
-    /// not acknowledged enforcing them. The table's constraints are those it has once this
-    /// transaction commits.
+    /// Rejects writing or committing when this transaction has effective CHECK constraints that
+    /// the connector has not acknowledged.
     #[cfg(feature = "check-constraints-in-dev")]
     fn ensure_check_constraints_acknowledged(&self) -> KernelResult<()> {
         require!(

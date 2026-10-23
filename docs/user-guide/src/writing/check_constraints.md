@@ -8,9 +8,9 @@ Before reading this page, make sure you understand [Appending data](./append.md)
 
 > [!NOTE]
 > CHECK constraint support is experimental and requires the `check-constraints-in-dev` Cargo feature
-> on `delta_kernel`. Without it, the APIs on this page don't exist and Kernel rejects writes to any
-> table that supports the `checkConstraints` table feature. See
-> [Feature flags](../concepts/feature_flags.md).
+> on `delta_kernel`. Without it, the `check_constraints()` and `ack_check_constraints()` methods
+> don't exist and Kernel rejects writes to any table that supports the `checkConstraints` table
+> feature. See [Feature flags](../concepts/feature_flags.md).
 
 ## Check constraints example
 
@@ -166,10 +166,10 @@ violate it into the table. Handle the returned `CommitResult` as described in
 ### Which operations need the acknowledgement?
 
 On a table that has CHECK constraints, `write_state()` and `commit()` both fail with an
-`InvalidTransactionState` error until you call `ack_check_constraints()`. Kernel applies this to
-every commit, including commits that only remove files or record a transaction identifier. Kernel
-can't tell which commits add unchecked rows, so it doesn't make exceptions. A table that supports
-the `checkConstraints` feature but declares no constraints needs no acknowledgement.
+`InvalidTransactionState` error unless you call `ack_check_constraints()` first. Kernel applies
+this to every commit, including commits that only remove files or record a transaction identifier.
+A table that supports the `checkConstraints` feature but declares no constraints needs no
+acknowledgement.
 
 The acknowledgement belongs to one transaction. Acknowledge again on each new transaction.
 

@@ -113,7 +113,9 @@ async fn snapshot_and_transaction_return_stored_constraints_in_name_order(
     let (_tmp, table_path, engine) = test_table_setup_mt()?;
     let constraints = [
         ("NonEmptyName", "name != ''"),
+        ("amount_below_limit", "amount < 1000"),
         ("positive_amount", "amount > 0"),
+        ("short_name", "length(name) < 100"),
     ];
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, &constraints).await?;
 
@@ -137,7 +139,7 @@ async fn snapshot_and_transaction_return_stored_constraints_in_name_order(
 
 #[rstest]
 #[tokio::test]
-async fn write_state_and_commits_succeed_only_with_constraint_acknowledgement(
+async fn write_state_and_commits_require_ack_only_on_tables_with_constraints(
     #[values(
         GatedOp::CommitWithData,
         GatedOp::RemoveOnlyCommit,
@@ -145,11 +147,17 @@ async fn write_state_and_commits_succeed_only_with_constraint_acknowledgement(
         GatedOp::WriteState
     )]
     op: GatedOp,
+    #[values(true, false)] declares_constraints: bool,
     #[values(true, false)] acknowledge: bool,
     #[values(true, false)] discover_first: bool,
 ) -> KernelResult<()> {
     let (_tmp, table_path, engine) = test_table_setup()?;
-    let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
+    let constraints = if declares_constraints {
+        POSITIVE_AMOUNT
+    } else {
+        &[]
+    };
+    let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, constraints).await?;
 
     let mut snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
     if op == GatedOp::RemoveOnlyCommit {
@@ -192,7 +200,7 @@ async fn write_state_and_commits_succeed_only_with_constraint_acknowledgement(
             let _committed = committed.unwrap_committed();
         })
     };
-    if acknowledge {
+    if acknowledge || !declares_constraints {
         result?;
     } else {
         assert_gate_error(result);
