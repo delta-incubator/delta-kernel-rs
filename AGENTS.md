@@ -124,8 +124,11 @@ table at a specific version. From it you build a `Scan` (reads) or `Transaction`
 
 
 **Write path:** `Snapshot` -> `UpdateTableTransactionBuilder` -> `Transaction` -> `commit()`.
-`UpdateTableTransactionBuilder` aliases `TransactionBuilder<UpdateTable>`; the create-table
-builder aliases `TransactionBuilder<CreateTable>`. Common setters have one generic implementation.
+`UpdateTableTransactionBuilder<MODE>` aliases `TransactionBuilder<UpdateTable, MODE>`; the
+create-table builder aliases `TransactionBuilder<CreateTable, MODE>`. The mode defaults to
+`Imperative`. Both entry points return imperative builders; with `declarative-plans`,
+`with_execution_mode::<MODE>()` selects the mode returned by `build()`. Common setters have one
+generic implementation.
 The sealed `TransactionType` trait selects opaque type-specific state; specialized implementations
 provide constructors, custom setters, and build validation.
 `Snapshot::update_table(operation, engine_info, data_change)` requires all three values at

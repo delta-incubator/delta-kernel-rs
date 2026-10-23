@@ -7,6 +7,7 @@
 //! than constructing the builder directly.
 
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use delta_kernel_derive::internal_api;
@@ -51,7 +52,7 @@ use crate::table_properties::{
 };
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
-use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Transaction};
+use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Imperative, Transaction};
 use crate::utils::{current_time_ms, try_parse_uri};
 use crate::{Engine, KernelError, KernelResult, StorageHandler};
 
@@ -808,7 +809,7 @@ fn validate_extract_table_features_and_properties(
 /// Created via [`create_table()`](super::super::create_table::create_table).
 ///
 /// cbindgen:ignore
-pub type CreateTableTransactionBuilder = TransactionBuilder<CreateTable>;
+pub type CreateTableTransactionBuilder<MODE = Imperative> = TransactionBuilder<CreateTable, MODE>;
 
 /// Opaque state collected by create-table-specific builder setters.
 #[doc(hidden)]
@@ -839,9 +840,12 @@ impl TransactionBuilder<CreateTable> {
                 table_properties: HashMap::new(),
                 data_layout: DataLayout::None,
             },
+            _mode: PhantomData,
         }
     }
+}
 
+impl<MODE: ExecutionMode> TransactionBuilder<CreateTable, MODE> {
     /// Sets table properties for the new Delta table.
     ///
     /// Custom application properties (those not starting with `delta.`) are always allowed.
@@ -972,7 +976,7 @@ impl TransactionBuilder<CreateTable> {
         self,
         engine: &dyn Engine,
         committer: Box<dyn Committer>,
-    ) -> KernelResult<CreateTableTransaction> {
+    ) -> KernelResult<CreateTableTransaction<MODE>> {
         self.common_state.validate()?;
 
         // Validate path
