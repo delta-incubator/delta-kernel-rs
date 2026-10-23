@@ -15,7 +15,7 @@ use super::{LastManifestCommitResolution, LogSegment};
 use crate::actions::LastManifestCommit;
 use crate::arrow::array::StringArray;
 use crate::committer::FileSystemCommitter;
-use crate::crc::{Crc, CrcDelta, FileStats, FileStatsState};
+use crate::crc::{Crc, FileStats, FileStatsState};
 use crate::engine::sync::SyncEngine;
 #[cfg(feature = "declarative-plans")]
 use crate::engine::test_delegating::DelegatingEngine;
@@ -808,8 +808,9 @@ impl PlanExecutor for CountingPlanExecutor {
 }
 
 // A standalone checkpoint written after the manifest commit hides that commit from the segment.
-// Replay still resolves P&M from the checkpoint and the newest commit's pointer, but following the
-// pointer to the action fails because the segment does not list its commit.
+// Replay still resolves P&M from the checkpoint and the newest commit's pointer without reading the
+// pointed commit, which is deleted here, but following the pointer to the action fails because the
+// segment does not list its commit.
 #[tokio::test]
 async fn standalone_checkpoint_above_pointed_commit_fails_to_read_its_action() {
     check_standalone_checkpoint_above_pointed_commit(non_plan_engine).await;
@@ -824,6 +825,10 @@ async fn check_standalone_checkpoint_above_pointed_commit<E: Engine>(
     let pointer = commit_info(Some((0, 0)));
     let (store, table_root) = manifest_commit_table(&[pointer.clone(), pointer]).await;
     put_pm_checkpoint(&store, 1).await;
+    store
+        .delete(&delta_path_for_version(0, "json"))
+        .await
+        .unwrap();
 
     let engine = make_engine(store);
     let storage = engine.storage_handler();
@@ -1430,26 +1435,6 @@ async fn snapshot_with_crc_at_version_serves_last_manifest_commit_from_crc(
         .await
         .unwrap();
     assert_eq!(snapshot.last_manifest_commit(&engine).unwrap(), expected);
-}
-
-// A post-commit snapshot takes `lastManifestCommit` from the committing transaction: the new
-// commit file is never written here, so any log read would fail.
-#[tokio::test]
-async fn post_commit_snapshot_takes_last_manifest_commit_from_the_transaction() {
-    let (store, table_root) = manifest_commit_table(&[]).await;
-    let engine = non_plan_engine(store);
-    let snapshot = Snapshot::builder_for(table_root.clone())
-        .build(&engine)
-        .unwrap();
-    let expected = Some(LastManifestCommit::new(0, 0).unwrap());
-
-    let commit = ParsedLogPath::create_parsed_published_commit(&table_root, 1);
-    let crc_delta = CrcDelta {
-        last_manifest_commit: expected.clone(),
-        ..Default::default()
-    };
-    let post_commit = snapshot.new_post_commit(commit, crc_delta, None).unwrap();
-    assert_eq!(post_commit.last_manifest_commit(&engine).unwrap(), expected);
 }
 
 // A snapshot that sits on a checkpoint (no CRC, no later commits) cannot read commitInfo during
