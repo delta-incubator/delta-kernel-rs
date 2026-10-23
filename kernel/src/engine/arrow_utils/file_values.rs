@@ -10,9 +10,9 @@ use crate::{KernelError, KernelResult};
 
 /// Fails if a non-null `file` value in `data` does not resolve to any referent, which the File
 /// type requires readers to reject: neither `uri` nor `inline` is set, or `offset` is set without
-/// `uri`. A relative `uri` is accepted: the File type resolves it against the table root
-/// (delta-io/delta#7724), and reading does not resolve it. `data` must already match `schema`, as
-/// [`super::apply_schema::apply_schema_to_struct`] ensures.
+/// `uri`. Any `uri`, absolute or relative, is accepted; a relative one resolves against the table
+/// root (delta-io/delta#7724), and reading does not resolve it. `data` must already match
+/// `schema`, as [`super::apply_schema::apply_schema_to_struct`] ensures.
 pub(crate) fn validate_file_values(data: &StructArray, schema: &StructType) -> KernelResult<()> {
     validate_struct(data, schema, &mut Vec::new())
 }
