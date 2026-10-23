@@ -1288,7 +1288,7 @@ impl Committer for TestCatalogCommitter {
     fn commit(
         &self,
         engine: &dyn Engine,
-        actions: KernelResultIterator<'_, FilteredEngineData>,
+        actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         commit_metadata: CommitMetadata,
     ) -> KernelResult<CommitResponse> {
         let path = commit_metadata.published_commit_path()?;
@@ -1901,7 +1901,7 @@ impl JsonHandler for CapturingJsonHandler {
     fn write_json_file(
         &self,
         path: &Url,
-        data: KernelResultIterator<'_, FilteredEngineData>,
+        data: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         overwrite: bool,
     ) -> KernelResult<u64> {
         self.inner.write_json_file(path, data, overwrite)

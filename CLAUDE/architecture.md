@@ -27,9 +27,8 @@ allowing helpers to specify another error type. `Result<T>` always uses the top-
 Converting a kernel error to that envelope requires `Error::Kernel` or `.map_err(Error::Kernel)`.
 There is no implicit `From<KernelError> for Error` conversion.
 
-Fallible kernel streams use `KernelResultIterator` and `KernelResultIteratorStatic`, including
-engine handlers and declarative-plan results. `ResultIterator` and `ResultIteratorStatic` yield
-top-level `Error` values.
+Fallible kernel streams implement the `KernelResultIterator<T>` marker trait, including engine
+handlers and declarative-plan results, which erase it as `Box<dyn KernelResultIterator<T>>`.
 
 ## Snapshot
 

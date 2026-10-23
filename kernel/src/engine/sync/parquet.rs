@@ -25,10 +25,8 @@ use crate::parquet::arrow::arrow_writer::ArrowWriter;
 use crate::schema::{SchemaRef, StructType};
 use crate::utils::FoldWithOption as _;
 #[cfg(test)]
-use crate::{
-    EngineData, FileDataReadResultIterator, FileSize, KernelResultIteratorStatic, ParquetHandler,
-};
-use crate::{FileMeta, KernelResult, ParquetFooter, PredicateRef};
+use crate::{EngineData, FileDataReadResultIterator, FileSize, ParquetHandler};
+use crate::{FileMeta, KernelResult, KernelResultIterator, ParquetFooter, PredicateRef};
 
 #[cfg(test)]
 #[derive(Constructor)]
@@ -41,7 +39,7 @@ pub(super) fn try_create_from_parquet(
     schema: SchemaRef,
     predicate: Option<PredicateRef>,
     file_location: String,
-) -> KernelResult<impl Iterator<Item = KernelResult<ArrowEngineData>>> {
+) -> KernelResult<impl KernelResultIterator<ArrowEngineData>> {
     let metadata = ArrowReaderMetadata::load(&data, reader_options())?;
     let (requested_ordering, mask) = parquet_read_plan(&schema, &metadata)?;
 
@@ -97,7 +95,7 @@ impl ParquetHandler for SyncParquetHandler {
     fn write_parquet_file(
         &self,
         location: Url,
-        mut data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+        mut data: Box<dyn KernelResultIterator<Box<dyn EngineData>>>,
     ) -> KernelResult<FileSize> {
         let first_batch = data.next().ok_or_else(|| {
             crate::KernelError::generic("Cannot write parquet file with empty data iterator")
@@ -154,7 +152,7 @@ mod tests {
     use crate::engine::arrow_conversion::TryIntoKernel as _;
     use crate::EngineData;
 
-    fn test_data_iter() -> KernelResultIteratorStatic<Box<dyn EngineData>> {
+    fn test_data_iter() -> Box<dyn KernelResultIterator<Box<dyn EngineData>>> {
         let engine_data: Box<dyn EngineData> = Box::new(ArrowEngineData::new(
             RecordBatch::try_from_iter(vec![
                 (
@@ -263,7 +261,7 @@ mod tests {
         ));
 
         let batches = vec![Ok(batch1), Ok(batch2), Ok(batch3)];
-        let data_iter: KernelResultIteratorStatic<Box<dyn EngineData>> =
+        let data_iter: Box<dyn KernelResultIterator<Box<dyn EngineData>>> =
             Box::new(batches.into_iter());
 
         handler.write_parquet_file(url.clone(), data_iter).unwrap();

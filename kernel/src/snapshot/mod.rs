@@ -48,6 +48,8 @@ use crate::utils::require;
 use crate::{Engine, KernelError, KernelResult, LogCompactionWriter, Version};
 
 mod builder;
+#[cfg(test)]
+mod cancellation_tests;
 mod hint;
 mod incremental;
 mod snapshot_crc;
