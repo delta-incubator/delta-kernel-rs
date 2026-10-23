@@ -15,6 +15,8 @@ use crate::{
 };
 
 mod export;
+#[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
+mod externalized;
 
 /// Exports retained snapshot state through one callback without engine I/O.
 ///
@@ -135,7 +137,7 @@ unsafe fn snapshot_builder_with_snapshot_hint_impl(
         ));
     };
     let freshness = value.freshness.into();
-    let log_paths = unsafe { value.log_paths.log_paths() }
+    let log_paths = unsafe { value.log_paths.log_paths_with_root(table_root) }
         .map_err(|source| invalid_with_source("supplied log paths are invalid", source))?;
     let protocol = unsafe { value.protocol.try_to_kernel() }
         .map_err(|source| invalid_with_source("supplied protocol is invalid", source))?;
