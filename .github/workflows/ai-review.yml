@@ -10,8 +10,12 @@
 #   CLAUDE_MAINTAINER_MODEL  Claude maintainer-pass model.
 #   CODEX_MAINTAINER_MODEL   Codex maintainer-pass model.
 #   DISPROVE_MODEL           GPT disprove-gate model.
-# Trusted users without write access may be listed in:
-#   .github/omnigent/ai-review-allowlist.txt
+# Optional repository variable (Settings -> Secrets and variables -> Actions -> Variables):
+#   AI_REVIEW_ALLOWLIST  JSON array of trusted GitHub logins, e.g. ["alice", "bob"].
+# Only list users trusted to trigger paid model runs and submit PR content to the LLM gateway,
+# automatically on their own PRs or via /review on any PR. Logins match case-insensitively.
+# An unset or empty variable allows no additional users. Update entries immediately on account
+# rename because the old login may later belong to someone else.
 # Optional named-bot comments:
 #   vars.OMNIGENT_BOT_APP_ID + secrets.OMNIGENT_BOT_APP_KEY
 #   vars.OMNIGENT_BOT_LOGIN  Exact GitHub App login used for history deduplication.
@@ -186,27 +190,12 @@ jobs:
           esac
           echo "has_write=$has_write" >> "$GITHUB_OUTPUT"
 
-      - name: Check out trusted AI review allowlist
-        if: >-
-          steps.trigger.outputs.skip != 'true' &&
-          steps.permission.outputs.has_write != 'true' &&
-          (
-            github.event_name == 'issue_comment' ||
-            github.event_name == 'pull_request_target'
-          )
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-          sparse-checkout: .github/omnigent/ai-review-allowlist.txt
-          sparse-checkout-cone-mode: false
-
       - name: Check trigger subject is authorized
         id: access
         if: steps.trigger.outputs.skip != 'true'
         env:
           AUTH_SUBJECT: ${{ steps.trigger.outputs.auth_subject }}
-          ALLOWLIST_PATH: .github/omnigent/ai-review-allowlist.txt
+          AI_REVIEW_ALLOWLIST: ${{ vars.AI_REVIEW_ALLOWLIST }}
           EVENT_NAME: ${{ github.event_name }}
           HAS_WRITE: ${{ steps.permission.outputs.has_write }}
         run: |
@@ -217,11 +206,15 @@ jobs:
           fi
 
           allowlisted=false
-          # The allowlist comes from the default branch, so a PR cannot authorize its author.
+          # Repository configuration supplies the allowlist, so a PR cannot authorize its author.
           if [[ "$EVENT_NAME" == "issue_comment" || \
                 "$EVENT_NAME" == "pull_request_target" ]] && \
-             [ -f "$ALLOWLIST_PATH" ] && \
-             grep -Fxiq -- "$AUTH_SUBJECT" "$ALLOWLIST_PATH"; then
+             [ -n "$AUTH_SUBJECT" ] && \
+             jq -se --arg login "$AUTH_SUBJECT" '
+               length == 1 and (.[0] |
+                 type == "array" and all(.[]; type == "string") and
+                 any(.[]; ascii_downcase == ($login | ascii_downcase)))
+             ' <<< "${AI_REVIEW_ALLOWLIST:-[]}" > /dev/null; then
             allowlisted=true
           fi
           if [ "$allowlisted" = "true" ]; then
