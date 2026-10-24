@@ -791,12 +791,11 @@ async fn test_lagging_checkpoint_action_defers_to_crc_pm() {
         .assert_p_m(None, crc_config.protocol(), crc_config.metadata());
 }
 
-// A CRC-seeded pruned replay (CRC below target) that finds a checkpoint action in the commits
-// after the CRC captures it: those commits include the newest, and checkpoint versions strictly
-// increase, so a hit is the latest action.
+// A snapshot resolves a checkpoint action written after a CRC below the target version. The
+// non-plan replay captures it; the plan replay leaves it to the newest commit's pointer.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[tokio::test]
-async fn test_crc_seeded_replay_captures_checkpoint_action_after_crc() {
+async fn test_crc_seeded_replay_resolves_checkpoint_action_after_crc() {
     let crc_config =
         adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
     let checkpoint_config = adaptive_metadata_table_configuration(

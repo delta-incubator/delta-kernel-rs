@@ -1,9 +1,9 @@
 //! AMT (adaptiveMetadata) tests for Protocol & Metadata replay: manifest commits whose P&M is
 //! carried by a `checkpoint` action, exercised on both the plan and non-plan replay paths.
 
-#[cfg(feature = "declarative-plans")]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "declarative-plans")]
+use std::sync::Mutex;
 
 use rstest::rstest;
 #[cfg(feature = "declarative-plans")]
@@ -19,10 +19,14 @@ use crate::crc::{Crc, FileStats, FileStatsState};
 use crate::engine::sync::SyncEngine;
 #[cfg(feature = "declarative-plans")]
 use crate::engine::test_delegating::DelegatingEngine;
+#[cfg(feature = "declarative-plans")]
+use crate::expressions::Scalar;
 use crate::object_store::memory::InMemory;
 use crate::object_store::ObjectStoreExt as _;
 #[cfg(feature = "declarative-plans")]
 use crate::path::ParsedLogPath;
+#[cfg(feature = "declarative-plans")]
+use crate::plans::ir::nodes::Operator;
 #[cfg(feature = "declarative-plans")]
 use crate::plans::{Operation, PlanExecutor, PlanResult};
 use crate::schema::SchemaRef;
@@ -643,8 +647,8 @@ async fn plan_replay_bounded_by_crc_or_checkpoint_runs_one_plan(
     }
 
     let inner: Arc<dyn Engine> = Arc::new(SyncEngine::new_with_store(store));
-    let plans = Arc::new(AtomicUsize::new(0));
-    let executor = Arc::new(CountingPlanExecutor {
+    let plans = Arc::new(Mutex::new(Vec::new()));
+    let executor = Arc::new(RecordingPlanExecutor {
         inner: inner.plan_executor().unwrap(),
         plans: plans.clone(),
     });
@@ -677,18 +681,19 @@ async fn plan_replay_bounded_by_crc_or_checkpoint_runs_one_plan(
         LastManifestCommitResolution::Unresolved
     };
     assert_eq!(resolution.last_manifest_commit, expected);
-    assert_eq!(plans.load(Ordering::Relaxed), 1);
+    assert_eq!(plans.lock().unwrap().len(), 1);
 }
 
-// The plan path reads the newest commit first and stops there when its P&M are final; otherwise it
-// runs exactly one more plan, which captures the pointed checkpoint action when the newest commit
-// lacks it.
+// The plan path reads the newest commit first and stops there when its P&M are final. Otherwise it
+// runs one more plan over the older commits, never the newest again, which captures the pointed
+// checkpoint action when the newest commit lacks it. Each case lists the commit versions each plan
+// scans.
 #[cfg(feature = "declarative-plans")]
 #[rstest]
 #[case::newest_commit_is_the_manifest_commit(
     vec![checkpoint_commit(0, &[], one_column_schema())],
     Some(0),
-    1
+    vec![vec![0]]
 )]
 #[case::newest_commit_has_pm(
     vec![
@@ -696,12 +701,12 @@ async fn plan_replay_bounded_by_crc_or_checkpoint_runs_one_plan(
         carrying_pointer((0, 0), standalone_pm_commit(one_column_schema())),
     ],
     None,
-    1
+    vec![vec![1]]
 )]
 #[case::pointer_to_older_manifest_commit(
     vec![checkpoint_commit(0, &[], one_column_schema()), commit_info(Some((0, 0)))],
     Some(0),
-    2
+    vec![vec![1], vec![0]]
 )]
 #[case::newest_action_lags_its_commit(
     vec![
@@ -710,31 +715,39 @@ async fn plan_replay_bounded_by_crc_or_checkpoint_runs_one_plan(
         carrying_pointer((2, 0), checkpoint_action(0, &[], one_column_schema())),
     ],
     Some(0),
-    2
+    vec![vec![2], vec![1]]
+)]
+#[case::no_older_commit_after_newest_action(
+    vec![
+        checkpoint_commit(0, &[], one_column_schema()),
+        carrying_pointer((1, 0), checkpoint_action(0, &[], one_column_schema())),
+    ],
+    Some(0),
+    vec![vec![1], vec![]]
 )]
 #[case::no_pointer(
     vec![standalone_pm_commit(one_column_schema()), commit_info(None)],
     None,
-    2
+    vec![vec![1], vec![0]]
 )]
 #[tokio::test]
 async fn plan_replay_runs_one_plan_beyond_the_newest_commit_only_when_needed(
     #[case] commits: Vec<String>,
     #[case] expected_version: Option<i64>,
-    #[case] expected_plans: usize,
+    #[case] expected_plans: Vec<Vec<i64>>,
 ) {
-    let plans = Arc::new(AtomicUsize::new(0));
-    let counter = plans.clone();
+    let plans = Arc::new(Mutex::new(Vec::new()));
+    let recorded = plans.clone();
     assert_replay_resolution(&commits, expected_version, move |store| {
         let engine: Arc<dyn Engine> = Arc::new(SyncEngine::new_with_store(store));
-        let executor = Arc::new(CountingPlanExecutor {
+        let executor = Arc::new(RecordingPlanExecutor {
             inner: engine.plan_executor().unwrap(),
-            plans: counter,
+            plans: recorded,
         });
         DelegatingEngine::new(engine).with_plan_executor(executor)
     })
     .await;
-    assert_eq!(plans.load(Ordering::Relaxed), expected_plans);
+    assert_eq!(*plans.lock().unwrap(), expected_plans);
 }
 
 // The pointed checkpoint action holds the P&M as of its `checkpointMetadata.version`, at least its
@@ -796,17 +809,32 @@ async fn check_pointed_action_above_segment_checkpoint<E: Engine>(
     );
 }
 
-// A plan executor that counts the operations it runs.
+// A plan executor that records the log versions each plan it runs scans.
 #[cfg(feature = "declarative-plans")]
-struct CountingPlanExecutor {
+struct RecordingPlanExecutor {
     inner: Arc<dyn PlanExecutor>,
-    plans: Arc<AtomicUsize>,
+    plans: Arc<Mutex<Vec<Vec<i64>>>>,
 }
 
 #[cfg(feature = "declarative-plans")]
-impl PlanExecutor for CountingPlanExecutor {
+impl PlanExecutor for RecordingPlanExecutor {
     fn execute_op(&self, op: Operation) -> KernelResult<PlanResult> {
-        self.plans.fetch_add(1, Ordering::Relaxed);
+        if let Operation::QueryPlan(plan) = &op {
+            let versions = plan
+                .nodes
+                .iter()
+                .flat_map(|node| match &node.op {
+                    Operator::ScanJson(scan) => scan.files.as_slice(),
+                    Operator::ScanParquet(scan) => scan.files.as_slice(),
+                    _ => &[],
+                })
+                .filter_map(|file| match file.file_constants.first() {
+                    Some(Scalar::Long(version)) => Some(*version),
+                    _ => None,
+                })
+                .collect();
+            self.plans.lock().unwrap().push(versions);
+        }
         self.inner.execute_op(op)
     }
 }

@@ -180,22 +180,17 @@ impl LogSegment {
     }
 
     /// Builds the declarative plan that selects the latest Protocol and Metadata actions. Under
-    /// `adaptive-metadata-in-dev`, it also selects the newest `commitInfo`, and the checkpoint
-    /// action of `manifest_commit` when given.
+    /// `adaptive-metadata-in-dev`, `plan` picks the files to read and the AMT actions to keep.
     #[cfg(feature = "declarative-plans")]
     fn build_pm_plan(
         &self,
-        #[cfg(feature = "adaptive-metadata-in-dev")] manifest_commit: Option<&ParsedLogPath>,
+        #[cfg(feature = "adaptive-metadata-in-dev")] plan: &PmPlan<'_>,
     ) -> KernelResult<Plan> {
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        let (commit_paths, extra_actions, checkpoint_arm) =
-            self.amt_pm_plan_inputs(manifest_commit)?;
+        let (commit_paths, extra_actions) =
+            (self.pm_plan_commit_paths(plan)?, plan.extra_actions());
         #[cfg(not(feature = "adaptive-metadata-in-dev"))]
-        let (commit_paths, extra_actions, checkpoint_arm) = (
-            self.find_commit_cover_paths(),
-            Vec::new(),
-            None::<Predicate>,
-        );
+        let (commit_paths, extra_actions) = (self.find_commit_cover_paths(), Vec::new());
         let schema = pm_plan_schema(&extra_actions)?;
 
         let commits = PlanBuilder::scan_json(
@@ -223,22 +218,43 @@ impl LogSegment {
             col!(METADATA_NAME, "id").is_not_null(),
         );
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        let relevant_action = Predicate::or(relevant_action, col!(COMMIT_INFO_NAME).is_not_null());
-        let relevant_action = match checkpoint_arm {
-            Some(checkpoint_arm) => Predicate::or(relevant_action, checkpoint_arm),
+        let relevant_action = if plan.reads_commit_info() {
+            Predicate::or(relevant_action, col!(COMMIT_INFO_NAME).is_not_null())
+        } else {
+            relevant_action
+        };
+        // A compaction tags all its actions with one version, so this matches only the commit's
+        // own file.
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        let relevant_action = match plan.checkpoint_action_commit() {
+            Some(commit) => {
+                let checkpoint_action_pred = Predicate::and(
+                    col!(CHECKPOINT_ACTION_NAME).is_not_null(),
+                    col!("version").eq(lit(commit.version_as_i64()?)),
+                );
+                Predicate::or(relevant_action, checkpoint_action_pred)
+            }
             None => relevant_action,
         };
 
         let relevant = PlanBuilder::union_all(std::iter::once(commits).chain(checkpoint))?
             .filter(relevant_action)?;
-        Self::newest_pm_plan(relevant, &extra_actions)
+        Self::newest_pm_plan(
+            relevant,
+            &extra_actions,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            plan.reads_commit_info(),
+        )
     }
 
-    /// Aggregates `input` to its newest Protocol and Metadata, with their versions, under
-    /// `adaptive-metadata-in-dev` its newest `commitInfo` with its version, and the newest of each
-    /// of `extra_actions`.
+    /// Aggregates `input` to its newest Protocol, Metadata, and each of `extra_actions`, plus the
+    /// versions of the Protocol, Metadata, and, when `reads_commit_info`, `commitInfo`.
     #[cfg(feature = "declarative-plans")]
-    fn newest_pm_plan(input: PlanBuilder, extra_actions: &[&StructField]) -> KernelResult<Plan> {
+    fn newest_pm_plan(
+        input: PlanBuilder,
+        extra_actions: &[&StructField],
+        #[cfg(feature = "adaptive-metadata-in-dev")] reads_commit_info: bool,
+    ) -> KernelResult<Plan> {
         input
             .aggregate_ungrouped(|a| {
                 let protocol = || column_name!(PROTOCOL_NAME);
@@ -257,13 +273,13 @@ impl LogSegment {
                         "metadata_version",
                     );
                 #[cfg(feature = "adaptive-metadata-in-dev")]
-                let a = {
-                    let commit_info = || column_name!(COMMIT_INFO_NAME);
-                    a.max_non_null_by(commit_info(), commit_info(), version())
-                        .aggregate_as(
-                            Agg::max_non_null_by(version(), commit_info(), version()),
-                            "commit_info_version",
-                        )
+                let a = if reads_commit_info {
+                    a.aggregate_as(
+                        Agg::max_non_null_by(version(), column_name!(COMMIT_INFO_NAME), version()),
+                        "commit_info_version",
+                    )
+                } else {
+                    a
                 };
                 extra_actions.iter().fold(a, |a, field| {
                     let action = || ColumnName::new([field.name()]);
@@ -274,44 +290,28 @@ impl LogSegment {
     }
 
     /// Reads the P&M commit cover and checkpoint via the declarative plan, tagging each batch with
-    /// its version. `manifest_commit` is as for [`Self::build_pm_plan`].
+    /// its version. `plan` is as for [`Self::build_pm_plan`].
     #[cfg(feature = "declarative-plans")]
     fn read_pm_batches_via_plan(
         &self,
         executor: &dyn PlanExecutor,
-        #[cfg(feature = "adaptive-metadata-in-dev")] manifest_commit: Option<&ParsedLogPath>,
-    ) -> KernelResult<impl KernelResultIterator<VersionedBatch>> {
-        let plan = self.build_pm_plan(
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            manifest_commit,
-        )?;
-        Self::execute_pm_plan(
-            executor,
-            plan,
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            manifest_commit.is_some(),
-            #[cfg(not(feature = "adaptive-metadata-in-dev"))]
-            false,
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            self.end_version,
-        )
-    }
-
-    /// Executes a P&M `plan`, tagging its output with the aggregated versions.
-    /// `reads_checkpoint_action` says whether the plan reads the checkpoint action column. Under
-    /// `adaptive-metadata-in-dev`, the output's `commitInfo` is taken only when it comes from the
-    /// commit at `end_version`.
-    #[cfg(feature = "declarative-plans")]
-    fn execute_pm_plan(
-        executor: &dyn PlanExecutor,
-        plan: Plan,
-        reads_checkpoint_action: bool,
-        #[cfg(feature = "adaptive-metadata-in-dev")] end_version: Version,
+        #[cfg(feature = "adaptive-metadata-in-dev")] plan: &PmPlan<'_>,
     ) -> KernelResult<impl KernelResultIterator<VersionedBatch>> {
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        let end_version = version_as_i64(end_version)?;
+        let (reads_checkpoint_action, newest_commit_version) = (
+            plan.checkpoint_action_commit().is_some(),
+            plan.reads_commit_info()
+                .then(|| version_as_i64(self.end_version))
+                .transpose()?,
+        );
+        #[cfg(not(feature = "adaptive-metadata-in-dev"))]
+        let reads_checkpoint_action = false;
+        let built = self.build_pm_plan(
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            plan,
+        )?;
         let batches = executor
-            .execute_op(Operation::QueryPlan(plan))?
+            .execute_op(Operation::QueryPlan(built))?
             .into_data()?
             .map(move |batch| {
                 // `pm_candidate` parses the checkpoint action only from log batches.
@@ -319,7 +319,7 @@ impl LogSegment {
                 versioned_plan_batch(
                     batch,
                     #[cfg(feature = "adaptive-metadata-in-dev")]
-                    end_version,
+                    newest_commit_version,
                 )
             });
         Ok(batches)
@@ -392,45 +392,70 @@ impl LogSegment {
         let candidate = resolve_pm_batches(self.read_pm_batches_via_plan(
             executor,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            None,
+            &PmPlan::WholeSegment,
         )?)?;
         #[cfg(feature = "adaptive-metadata-in-dev")]
         candidate.ensure_pointer_at_or_before(self.end_version)?;
         Ok(candidate)
     }
 
-    /// Replays P&M by first reading the newest commit in its own plan, then, when that commit's P&M
-    /// are not final, at most one more plan bounded by its `lastManifestCommit`.
+    /// Reads the newest commit in its own plan. If its P&M are not final, runs one more plan over
+    /// the older commits, starting at the pointed content root when the segment lists the
+    /// manifest commit.
     #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
     fn replay_for_pm_from_newest_commit(
         &self,
         executor: &dyn PlanExecutor,
         newest_commit: &ParsedLogPath,
     ) -> KernelResult<PmCandidate> {
-        let newest =
-            resolve_pm_batches(Self::read_newest_commit_via_plan(executor, newest_commit)?)?
-                .validated_pointer(self.end_version)?;
+        let newest = resolve_pm_batches(
+            self.read_pm_batches_via_plan(executor, &PmPlan::NewestCommit(newest_commit))?,
+        )?
+        .validated_pointer(self.end_version)?;
         let end_version = version_as_i64(self.end_version)?;
         if is_final(&newest.protocol, Some(end_version))
             && is_final(&newest.metadata, Some(end_version))
         {
             return Ok(newest);
         }
-        match self.manifest_commit_to_read(&newest) {
+        let (after, manifest_commit) = match self.manifest_commit_to_read(&newest) {
             Some((manifest_commit, pointer)) => {
-                self.replay_for_pm_from_manifest_commit(executor, newest, manifest_commit, pointer)
+                // The pointed action has the P&M as of its content root, so earlier commits hold
+                // nothing newer. Start at the content root, not after it: the manifest commit can
+                // be the content root itself. A content root of 0 means no lower bound.
+                let content_root = pointer.content_root_version;
+                (
+                    (content_root > 0).then(|| content_root - 1),
+                    Some(manifest_commit),
+                )
             }
-            None => {
-                // The newest commit's own checkpoint action holds the P&M as of its version.
-                let after = newest.checkpoint.as_ref().map(|(version, _)| *version);
-                Ok(newest.merge(self.replay_for_pm_after(executor, after, None)?))
-            }
+            // The newest commit's own checkpoint action holds the P&M as of its version.
+            None => (
+                newest.checkpoint.as_ref().map(|(version, _)| *version),
+                None,
+            ),
+        };
+        let older = PmPlan::OlderCommits {
+            after,
+            manifest_commit,
+        };
+        let resolved = newest.merge(resolve_pm_batches(
+            self.read_pm_batches_via_plan(executor, &older)?,
+        )?);
+        // Replay skips P&M before the content root, so the action is needed only when replay lacks
+        // Protocol or Metadata without it.
+        if manifest_commit.is_some()
+            && (resolved.checkpoint.is_some()
+                || resolved.protocol.is_none()
+                || resolved.metadata.is_none())
+        {
+            return resolved.require_pointed_checkpoint();
         }
+        Ok(resolved)
     }
 
-    /// The listed manifest commit, with its pointer, whose checkpoint action replay must still
-    /// read: the commit the `newest` commit's `lastManifestCommit` names when the newest commit
-    /// does not carry the action itself.
+    /// The manifest commit, with its pointer, whose checkpoint action replay still needs: the one
+    /// the newest commit's `lastManifestCommit` names, when the newest commit lacks the action.
     #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
     fn manifest_commit_to_read(
         &self,
@@ -439,111 +464,56 @@ impl LogSegment {
         if newest.checkpoint.is_some() {
             return None;
         }
-        // An unlisted pointed commit is at or below where this segment starts, so whatever covers
-        // that start has P&M at least as new, and the action is left to the lazy pointer read.
+        // An unlisted manifest commit is at or below where this segment starts, so whatever covers
+        // that start has P&M at least as new. The snapshot reads the action through the pointer.
         let pointer = newest.last_manifest_commit.as_ref()?;
         Some((self.find_pointed_commit(pointer)?, pointer.clone()))
     }
 
-    /// Replays P&M from the content root of `pointer`, which names `manifest_commit`, in one plan
-    /// that also reads that commit's checkpoint action, and merges it into `newest`.
+    /// The commit files `plan` reads.
     #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-    fn replay_for_pm_from_manifest_commit(
-        &self,
-        executor: &dyn PlanExecutor,
-        newest: PmCandidate,
-        manifest_commit: &ParsedLogPath,
-        pointer: LastManifestCommit,
-    ) -> KernelResult<PmCandidate> {
-        // The pointed action holds the P&M as of at least its content root version, so earlier
-        // commits hold nothing newer.
-        let content_root = pointer.content_root_version;
-        let after = (content_root > 0).then(|| content_root - 1);
-        let rest = self.replay_for_pm_after(executor, after, Some(manifest_commit))?;
-        let resolved = newest.merge(rest);
-        // Replay skips P&M before the content root, so the action is needed only when replay lacks
-        // Protocol or Metadata without it.
-        if resolved.checkpoint.is_some()
-            || resolved.protocol.is_none()
-            || resolved.metadata.is_none()
-        {
-            return resolved.require_pointed_checkpoint();
-        }
-        Ok(resolved)
-    }
-
-    /// Replays P&M from the commits after version `after`, or the whole segment when `None`, in
-    /// one plan that also reads the checkpoint action of `manifest_commit` when given.
-    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-    fn replay_for_pm_after(
-        &self,
-        executor: &dyn PlanExecutor,
-        after: Option<i64>,
-        manifest_commit: Option<&ParsedLogPath>,
-    ) -> KernelResult<PmCandidate> {
-        let trimmed = after
-            .map(|version| {
-                let version = Version::try_from(version).map_err(|_| {
-                    KernelError::internal_error(format!("negative replay start version {version}"))
-                })?;
-                Ok::<_, KernelError>(self.segment_after_version(version))
-            })
-            .transpose()?;
-        let replayed = trimmed.as_ref().unwrap_or(self);
-        resolve_pm_batches(replayed.read_pm_batches_via_plan(executor, manifest_commit)?)
-    }
-
-    /// Reads the newest `commit`'s Protocol, Metadata, checkpoint action, and `lastManifestCommit`
-    /// with a single-file plan.
-    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-    fn read_newest_commit_via_plan(
-        executor: &dyn PlanExecutor,
-        commit: &ParsedLogPath,
-    ) -> KernelResult<impl KernelResultIterator<VersionedBatch>> {
-        let extra_actions = [&*CHECKPOINT_ACTION_FIELD];
-        let scan = PlanBuilder::scan_json(
-            Self::version_tagged_scan_files([commit])?,
-            &["version"],
-            pm_plan_schema(&extra_actions)?,
-        )?;
-        let plan = Self::newest_pm_plan(scan, &extra_actions)?;
-        Self::execute_pm_plan(executor, plan, true, commit.version)
-    }
-
-    /// The commit files a P&M plan reads, the actions it reads beyond Protocol, Metadata, and
-    /// `commitInfo`, and the filter arm that keeps them. `manifest_commit` is as for
-    /// [`Self::build_pm_plan`].
-    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-    fn amt_pm_plan_inputs(
-        &self,
-        manifest_commit: Option<&ParsedLogPath>,
-    ) -> KernelResult<(
-        Vec<ParsedLogPath>,
-        Vec<&'static StructField>,
-        Option<Predicate>,
-    )> {
-        let (mut commit_paths, extra_actions, checkpoint_arm) = match manifest_commit {
-            Some(manifest_commit) => {
-                // A compaction spanning the manifest commit is tagged with one version for all its
-                // actions and may drop the checkpoint action, so read the commits around it one
-                // by one.
-                let paths = self.find_commit_cover_paths_reading(manifest_commit.version);
-                // No compaction spans the manifest commit, so only its own file has its version.
-                let checkpoint_arm = Predicate::and(
-                    col!(CHECKPOINT_ACTION_NAME).is_not_null(),
-                    col!("version").eq(lit(manifest_commit.version_as_i64()?)),
+    fn pm_plan_commit_paths(&self, plan: &PmPlan<'_>) -> KernelResult<Vec<ParsedLogPath>> {
+        match plan {
+            PmPlan::WholeSegment => {
+                let mut paths = self.find_commit_cover_paths();
+                // Log compactions drop commitInfo, so read the newest commit itself when one
+                // covers it.
+                if let Some(newest_commit) = self.newest_commit() {
+                    if !paths.contains(newest_commit) {
+                        paths.push(newest_commit.clone());
+                    }
+                }
+                Ok(paths)
+            }
+            PmPlan::NewestCommit(commit) => Ok(vec![(*commit).clone()]),
+            PmPlan::OlderCommits {
+                after,
+                manifest_commit,
+            } => {
+                let trimmed = after
+                    .map(|version| {
+                        let version = Version::try_from(version).map_err(|_| {
+                            KernelError::internal_error(format!(
+                                "negative replay start version {version}"
+                            ))
+                        })?;
+                        Ok::<_, KernelError>(self.segment_after_version(version))
+                    })
+                    .transpose()?;
+                let segment = trimmed.as_ref().unwrap_or(self);
+                // Read the manifest commit and the newest commit as their own files, not through a
+                // compaction, then skip the newest commit: replay has already read it.
+                let versions = Vec::from_iter(
+                    manifest_commit
+                        .map(|commit| commit.version)
+                        .into_iter()
+                        .chain([self.end_version]),
                 );
-                (paths, vec![&*CHECKPOINT_ACTION_FIELD], Some(checkpoint_arm))
-            }
-            None => (self.find_commit_cover_paths(), vec![], None),
-        };
-        // Log compactions drop commitInfo, so read the newest commit itself when one covers it.
-        if let Some(newest_commit) = self.newest_commit() {
-            if !commit_paths.contains(newest_commit) {
-                commit_paths.push(newest_commit.clone());
+                let mut paths = segment.find_commit_cover_paths_with_commit_versions(&versions);
+                paths.retain(|path| path.version != self.end_version);
+                Ok(paths)
             }
         }
-        Ok((commit_paths, extra_actions, checkpoint_arm))
     }
 
     /// The commit at `end_version`, if this segment lists it (it does not when the segment ends
@@ -567,6 +537,52 @@ enum PmReplayBound {
     CheckpointFile,
     /// Nothing: the replay may need the checkpoint action that `lastManifestCommit` points at.
     Unbounded,
+}
+
+/// A P&M plan the replay runs.
+#[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PmPlan<'a> {
+    /// The segment's commits and checkpoint.
+    WholeSegment,
+    /// Only the newest commit.
+    NewestCommit(&'a ParsedLogPath),
+    /// The commits after `after` (all when `None`), except the newest. Also keeps
+    /// `manifest_commit`'s checkpoint action.
+    OlderCommits {
+        after: Option<i64>,
+        manifest_commit: Option<&'a ParsedLogPath>,
+    },
+}
+
+#[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+impl<'a> PmPlan<'a> {
+    /// Whether the plan reads `commitInfo`. Only the newest commit's matters.
+    fn reads_commit_info(&self) -> bool {
+        !matches!(self, Self::OlderCommits { .. })
+    }
+
+    /// The commit whose checkpoint action the plan keeps.
+    fn checkpoint_action_commit(&self) -> Option<&'a ParsedLogPath> {
+        match *self {
+            Self::WholeSegment => None,
+            Self::NewestCommit(commit) => Some(commit),
+            Self::OlderCommits {
+                manifest_commit, ..
+            } => manifest_commit,
+        }
+    }
+
+    /// The actions the plan reads beyond Protocol and Metadata.
+    fn extra_actions(&self) -> Vec<&'static StructField> {
+        let commit_info = self
+            .reads_commit_info()
+            .then(LastManifestCommitVisitor::commit_info_field);
+        let checkpoint_action = self
+            .checkpoint_action_commit()
+            .map(|_| &*CHECKPOINT_ACTION_FIELD);
+        commit_info.into_iter().chain(checkpoint_action).collect()
+    }
 }
 
 /// How a snapshot's `lastManifestCommit` was resolved at build time, stored on the
@@ -875,19 +891,13 @@ fn pm_replay_schemas() -> (Arc<StructType>, Arc<StructType>) {
     (commit_schema, checkpoint_schema)
 }
 
-/// The P&M plan read schema: Protocol, Metadata, under `adaptive-metadata-in-dev` `commitInfo`,
-/// `extra_actions`, and the file-constant `version`.
+/// The P&M plan read schema: Protocol, Metadata, `extra_actions`, and the file-constant `version`.
 #[cfg(feature = "declarative-plans")]
 fn pm_plan_schema(extra_actions: &[&StructField]) -> KernelResult<SchemaRef> {
-    let actions = [
-        &*PROTOCOL_FIELD,
-        &*METADATA_FIELD,
-        #[cfg(feature = "adaptive-metadata-in-dev")]
-        LastManifestCommitVisitor::commit_info_field(),
-    ]
-    .into_iter()
-    .chain(extra_actions.iter().copied())
-    .cloned();
+    let actions = [&*PROTOCOL_FIELD, &*METADATA_FIELD]
+        .into_iter()
+        .chain(extra_actions.iter().copied())
+        .cloned();
     let version = StructField::not_null("version", DataType::LONG);
     Ok(Arc::new(StructType::try_new(actions.chain([version]))?))
 }
@@ -935,33 +945,47 @@ fn pm_candidate(
 }
 
 /// Tags a P&M plan's output `batch` with the versions its aggregate emits. Under
-/// `adaptive-metadata-in-dev`, it comes from the newest commit when its `commitInfo` is from
-/// `end_version`.
+/// `adaptive-metadata-in-dev`, the batch comes from the newest commit when the plan reads
+/// `commitInfo` and it is from `newest_commit_version`.
 #[cfg(feature = "declarative-plans")]
 fn versioned_plan_batch(
     batch: ActionsBatch,
-    #[cfg(feature = "adaptive-metadata-in-dev")] end_version: i64,
+    #[cfg(feature = "adaptive-metadata-in-dev")] newest_commit_version: Option<i64>,
 ) -> KernelResult<VersionedBatch> {
     #[derive(Default)]
     struct PmVersionsVisitor {
         protocol: Option<i64>,
         metadata: Option<i64>,
         #[cfg(feature = "adaptive-metadata-in-dev")]
+        reads_commit_info: bool,
+        #[cfg(feature = "adaptive-metadata-in-dev")]
         commit_info: Option<i64>,
+    }
+    fn version_columns(names: Vec<ColumnName>) -> ColumnNamesAndTypes {
+        let types = vec![DataType::LONG; names.len()];
+        (names, types).into()
     }
     impl RowVisitor for PmVersionsVisitor {
         fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-            static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
-                let names = vec![
+            static PM: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+                version_columns(vec![
                     column_name!("protocol_version"),
                     column_name!("metadata_version"),
-                    #[cfg(feature = "adaptive-metadata-in-dev")]
-                    column_name!("commit_info_version"),
-                ];
-                let types = vec![DataType::LONG; names.len()];
-                (names, types).into()
+                ])
             });
-            NAMES_AND_TYPES.as_ref()
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            static PM_AND_COMMIT_INFO: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+                version_columns(vec![
+                    column_name!("protocol_version"),
+                    column_name!("metadata_version"),
+                    column_name!("commit_info_version"),
+                ])
+            });
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            if self.reads_commit_info {
+                return PM_AND_COMMIT_INFO.as_ref();
+            }
+            PM.as_ref()
         }
         fn visit<'a>(
             &mut self,
@@ -972,20 +996,25 @@ fn versioned_plan_batch(
                 self.protocol = getters[0].get_opt(0, "protocol_version")?;
                 self.metadata = getters[1].get_opt(0, "metadata_version")?;
                 #[cfg(feature = "adaptive-metadata-in-dev")]
-                {
+                if self.reads_commit_info {
                     self.commit_info = getters[2].get_opt(0, "commit_info_version")?;
                 }
             }
             Ok(())
         }
     }
-    let mut visitor = PmVersionsVisitor::default();
+    let mut visitor = PmVersionsVisitor {
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        reads_commit_info: newest_commit_version.is_some(),
+        ..Default::default()
+    };
     visitor.visit_rows_of(batch.actions.as_ref())?;
     Ok(VersionedBatch {
         protocol_version: visitor.protocol,
         metadata_version: visitor.metadata,
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        is_newest_commit: visitor.commit_info == Some(end_version),
+        is_newest_commit: newest_commit_version
+            .is_some_and(|version| visitor.commit_info == Some(version)),
         batch,
     })
 }
@@ -999,6 +1028,8 @@ mod tests {
     use itertools::Itertools;
     use test_log::test;
 
+    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+    use super::PmPlan;
     use crate::engine::sync::SyncEngine;
     #[cfg(feature = "declarative-plans")]
     use crate::engine::test_delegating::DelegatingEngine;
@@ -1072,17 +1103,16 @@ mod tests {
         assert_eq!(data.len(), 4);
     }
 
-    /// The filter of `segment`'s P&M plan, built with `manifest_commit` under
-    /// `adaptive-metadata-in-dev`.
+    /// The filter of `segment`'s P&M plan, built from `plan` under `adaptive-metadata-in-dev`.
     #[cfg(feature = "declarative-plans")]
     fn pm_plan_filter(
         segment: &LogSegment,
-        #[cfg(feature = "adaptive-metadata-in-dev")] manifest_commit: Option<&ParsedLogPath>,
+        #[cfg(feature = "adaptive-metadata-in-dev")] plan: &PmPlan<'_>,
     ) -> Predicate {
         let plan = segment
             .build_pm_plan(
                 #[cfg(feature = "adaptive-metadata-in-dev")]
-                manifest_commit,
+                plan,
             )
             .unwrap();
         plan.nodes
@@ -1106,13 +1136,18 @@ mod tests {
 
     #[cfg(feature = "declarative-plans")]
     fn pm_predicate() -> Predicate {
-        let pm = Predicate::or(
-            col!("protocol.minReaderVersion").is_not_null(),
-            col!("metaData.id").is_not_null(),
-        );
+        let pm = protocol_or_metadata();
         #[cfg(feature = "adaptive-metadata-in-dev")]
         let pm = Predicate::or(pm, col!("commitInfo").is_not_null());
         pm
+    }
+
+    #[cfg(feature = "declarative-plans")]
+    fn protocol_or_metadata() -> Predicate {
+        Predicate::or(
+            col!("protocol.minReaderVersion").is_not_null(),
+            col!("metaData.id").is_not_null(),
+        )
     }
 
     #[cfg(feature = "declarative-plans")]
@@ -1122,7 +1157,7 @@ mod tests {
         let filter = pm_plan_filter(
             snapshot.log_segment(),
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            None,
+            &PmPlan::WholeSegment,
         );
         assert_eq!(filter, pm_predicate());
     }
@@ -1133,9 +1168,14 @@ mod tests {
         let snapshot = app_txn_checkpoint_snapshot();
         let manifest_commit =
             ParsedLogPath::create_parsed_published_commit(snapshot.table_root(), 1);
-        let filter = pm_plan_filter(snapshot.log_segment(), Some(&manifest_commit));
+        let plan = PmPlan::OlderCommits {
+            after: None,
+            manifest_commit: Some(&manifest_commit),
+        };
+        let filter = pm_plan_filter(snapshot.log_segment(), &plan);
+        // Older commits skip `commitInfo`: only the newest commit's matters.
         let expected = Predicate::or(
-            pm_predicate(),
+            protocol_or_metadata(),
             Predicate::and(
                 col!("checkpoint").is_not_null(),
                 col!("version").eq(lit(1i64)),

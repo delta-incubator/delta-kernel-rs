@@ -2311,7 +2311,7 @@ fn assert_cover(log_segment: &LogSegment, cover: &[FileMeta], expected_files: &[
 #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
 #[rstest]
 #[case::replaces_spanning_compaction_with_commits(
-    2,
+    &[2],
     &[
         ExpectedFile::Commit(4),
         ExpectedFile::Commit(3),
@@ -2320,7 +2320,7 @@ fn assert_cover(log_segment: &LogSegment, cover: &[FileMeta], expected_files: &[
     ]
 )]
 #[case::spanning_compaction_end(
-    1,
+    &[1],
     &[
         ExpectedFile::Commit(4),
         ExpectedFile::Compaction(2, 3),
@@ -2329,12 +2329,22 @@ fn assert_cover(log_segment: &LogSegment, cover: &[FileMeta], expected_files: &[
     ]
 )]
 #[case::no_compaction_spans_version(
-    4,
+    &[4],
     &[ExpectedFile::Commit(4), ExpectedFile::Compaction(2, 3), ExpectedFile::Compaction(0, 1)]
 )]
+#[case::compactions_spanning_either_version(
+    &[0, 3],
+    &[
+        ExpectedFile::Commit(4),
+        ExpectedFile::Commit(3),
+        ExpectedFile::Commit(2),
+        ExpectedFile::Commit(1),
+        ExpectedFile::Commit(0),
+    ]
+)]
 #[tokio::test]
-async fn commit_cover_reading_version_never_uses_a_compaction_spanning_it(
-    #[case] version: Version,
+async fn commit_cover_with_commit_versions_never_uses_a_compaction_spanning_them(
+    #[case] versions: &[Version],
     #[case] expected_files: &[ExpectedFile],
 ) {
     let mut log_segment = create_segment_for(LogSegmentConfig {
@@ -2355,7 +2365,7 @@ async fn commit_cover_reading_version_never_uses_a_compaction_spanning_it(
     log_segment.listed.ascending_compaction_files = compactions;
 
     let cover = log_segment
-        .find_commit_cover_paths_reading(version)
+        .find_commit_cover_paths_with_commit_versions(versions)
         .into_iter()
         .map(|path| path.location)
         .collect_vec();

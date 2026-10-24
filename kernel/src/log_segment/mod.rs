@@ -997,14 +997,18 @@ impl LogSegment {
         self.commit_cover_paths_using(self.listed.ascending_compaction_files.iter())
     }
 
-    /// Like [`Self::find_commit_cover_paths`], but never uses a log compaction whose range contains
-    /// `version`, so the cover reads the commit at `version` itself.
+    /// Like [`Self::find_commit_cover_paths`], but never uses a log compaction that spans any of
+    /// `versions`, so the cover reads those commits as their own files.
     #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-    fn find_commit_cover_paths_reading(&self, version: Version) -> Vec<ParsedLogPath> {
+    fn find_commit_cover_paths_with_commit_versions(
+        &self,
+        versions: &[Version],
+    ) -> Vec<ParsedLogPath> {
         let spans_version = |compaction: &&ParsedLogPath| {
             matches!(
                 compaction.file_type,
-                LogPathFileType::CompactedCommit { hi } if compaction.version <= version && version <= hi
+                LogPathFileType::CompactedCommit { hi }
+                    if versions.iter().any(|v| (compaction.version..=hi).contains(v))
             )
         };
         self.commit_cover_paths_using(
