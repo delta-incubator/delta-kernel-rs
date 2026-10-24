@@ -490,7 +490,7 @@ impl ActionReconciliationVisitor<'_> {
         let Some(FileActionInfo {
             key: file_key,
             is_add,
-            size,
+            ..
         }) = self.deduplicator.extract_file_action(i, getters, false)?
         else {
             return Ok(None); // No file action found, continue checking other types
@@ -504,8 +504,10 @@ impl ActionReconciliationVisitor<'_> {
             if let Some(crc) = self.crc.as_deref_mut() {
                 if let FileStatsState::Complete(stats) = &mut crc.file_stats_state {
                     let num_files = stats.num_files.checked_add(1);
-                    let table_size_bytes = i64::try_from(size)
-                        .ok()
+                    // TODO(#3715): Like extract_file_action, warn on missing add.size. Revisit
+                    // whether both paths should error instead.
+                    let table_size_bytes = getters[Self::ADD_SIZE.index]
+                        .get_long(i, Self::ADD_SIZE.name)?
                         .and_then(|bytes| stats.table_size_bytes.checked_add(bytes));
                     if let (Some(num_files), Some(table_size_bytes)) = (num_files, table_size_bytes)
                     {
@@ -515,7 +517,7 @@ impl ActionReconciliationVisitor<'_> {
                         crc.file_stats_state = FileStatsState::Indeterminate;
                         warn!(
                             version = crc.version,
-                            "CRC calculation overflow during action reconciliation"
+                            "CRC calculation unavailable: missing add.size or overflow"
                         );
                     }
                 }
@@ -758,9 +760,12 @@ mod tests {
     use test_utils::assert_result_error_with_message;
 
     use super::*;
+    use crate::actions::get_all_actions_schema;
     use crate::arrow::array::StringArray;
-    use crate::unit_test_utils::{action_batch, parse_json_batch};
-    use crate::KernelError;
+    use crate::engine::sync::SyncEngine;
+    use crate::schema::{SchemaStructPatchBuilder, StructField};
+    use crate::unit_test_utils::{action_batch, parse_json_batch, string_array_to_engine_data};
+    use crate::{Engine as _, KernelError};
 
     /// Helper function to create test batches from JSON strings
     fn create_batch(json_strings: Vec<&str>) -> KernelResult<ActionsBatch> {
@@ -834,30 +839,65 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn checkpoint_crc_overflow_does_not_fail_reconciliation() -> KernelResult<()> {
-        let batches = vec![
-            create_batch(vec![
-                r#"{"add":{"path":"large","size":9223372036854775807,"partitionValues":{},
-                    "modificationTime":0,"dataChange":true}}"#,
-            ])?,
-            create_batch(vec![
-                r#"{"add":{"path":"small","size":1,"partitionValues":{},
-                    "modificationTime":0,"dataChange":true}}"#,
-            ])?,
-        ];
+    #[rstest::rstest]
+    #[case::negative([r#""size":-10,"#, r#""size":20,"#], 10)]
+    #[case::negative_total([r#""size":-10,"#, r#""size":5,"#], -5)]
+    fn checkpoint_crc_preserves_signed_sizes(
+        #[case] sizes: [&str; 2],
+        #[case] expected_size: i64,
+    ) -> KernelResult<()> {
+        let crc = process_action_batches_for_crc(sizes)?;
+        let stats = crc.file_stats().unwrap();
+        assert_eq!(stats.num_files(), 2);
+        assert_eq!(stats.table_size_bytes(), expected_size);
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::missing(["", r#""size":1,"#])]
+    #[case::null([r#""size":null,"#, r#""size":1,"#])]
+    #[case::overflow([r#""size":9223372036854775807,"#, r#""size":1,"#])]
+    #[case::underflow([r#""size":-9223372036854775808,"#, r#""size":-1,"#])]
+    fn checkpoint_crc_missing_size_or_overflow_becomes_indeterminate(
+        #[case] sizes: [&str; 2],
+    ) -> KernelResult<()> {
+        let crc = process_action_batches_for_crc(sizes)?;
+        assert_eq!(crc.file_stats_state, FileStatsState::Indeterminate);
+        assert!(crc.file_stats().is_none());
+        Ok(())
+    }
+
+    /// Processes Add actions with the supplied size fields and returns the CRC computed from them.
+    fn process_action_batches_for_crc(sizes: [&str; 2]) -> KernelResult<Crc> {
+        let engine = SyncEngine::new();
+        let nullable_size_schema = Arc::new(
+            SchemaStructPatchBuilder::new()
+                .replace_at(
+                    ["add"],
+                    "size",
+                    StructField::nullable("size", DataType::LONG),
+                )
+                .build(get_all_actions_schema())?,
+        );
         let crc = Arc::new(Mutex::new(Crc::default()));
         let mut processor =
             ActionReconciliationProcessor::new(0, None, None, Some(Arc::clone(&crc)));
         let mut add_actions_count = 0;
-        for batch in batches {
+        for (index, size_field) in sizes.into_iter().enumerate() {
+            let action = format!(
+                r#"{{"add":{{"path":"file_{index}",{size_field}"partitionValues":{{}},
+                    "modificationTime":0,"dataChange":true}}}}"#
+            );
+            let actions = engine.json_handler().parse_json(
+                string_array_to_engine_data(StringArray::from(vec![action.as_str()])),
+                nullable_size_schema.clone(),
+            )?;
+            let batch = ActionsBatch::new(actions, true);
             add_actions_count += processor.process_actions_batch(batch)?.add_actions_count;
         }
         assert_eq!(add_actions_count, 2);
-        let crc = crc.lock().unwrap();
-        assert_eq!(crc.file_stats_state, FileStatsState::Indeterminate);
-        assert!(crc.file_stats().is_none());
-        Ok(())
+        let crc = crc.lock().unwrap().clone();
+        Ok(crc)
     }
 
     /// Helper function which applies the [`ActionReconciliationProcessor`] to a set of
