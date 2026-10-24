@@ -2311,6 +2311,7 @@ fn assert_cover(log_segment: &LogSegment, cover: &[FileMeta], expected_files: &[
 #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
 #[rstest]
 #[case::replaces_spanning_compaction_with_commits(
+    (None, 4),
     &[2],
     &[
         ExpectedFile::Commit(4),
@@ -2320,6 +2321,7 @@ fn assert_cover(log_segment: &LogSegment, cover: &[FileMeta], expected_files: &[
     ]
 )]
 #[case::spanning_compaction_end(
+    (None, 4),
     &[1],
     &[
         ExpectedFile::Commit(4),
@@ -2329,10 +2331,12 @@ fn assert_cover(log_segment: &LogSegment, cover: &[FileMeta], expected_files: &[
     ]
 )]
 #[case::no_compaction_spans_version(
+    (None, 4),
     &[4],
     &[ExpectedFile::Commit(4), ExpectedFile::Compaction(2, 3), ExpectedFile::Compaction(0, 1)]
 )]
 #[case::compactions_spanning_either_version(
+    (None, 4),
     &[0, 3],
     &[
         ExpectedFile::Commit(4),
@@ -2342,9 +2346,21 @@ fn assert_cover(log_segment: &LogSegment, cover: &[FileMeta], expected_files: &[
         ExpectedFile::Commit(0),
     ]
 )]
+#[case::oldest_exclusive_drops_files_at_or_below_it(
+    (Some(1), 4),
+    &[],
+    &[ExpectedFile::Commit(4), ExpectedFile::Compaction(2, 3)]
+)]
+#[case::newest_inclusive_drops_compaction_past_it(
+    (None, 2),
+    &[],
+    &[ExpectedFile::Commit(2), ExpectedFile::Compaction(0, 1)]
+)]
+#[case::empty_range((Some(4), 4), &[], &[])]
 #[tokio::test]
-async fn commit_cover_with_commit_versions_never_uses_a_compaction_spanning_them(
-    #[case] versions: &[Version],
+async fn commit_cover_in_range_reads_required_deltas_as_their_own_files(
+    #[case] (oldest_exclusive, newest_inclusive): (Option<Version>, Version),
+    #[case] required_deltas: &[Version],
     #[case] expected_files: &[ExpectedFile],
 ) {
     let mut log_segment = create_segment_for(LogSegmentConfig {
@@ -2365,7 +2381,7 @@ async fn commit_cover_with_commit_versions_never_uses_a_compaction_spanning_them
     log_segment.listed.ascending_compaction_files = compactions;
 
     let cover = log_segment
-        .find_commit_cover_paths_with_commit_versions(versions)
+        .find_commit_cover_paths_in_range(oldest_exclusive, newest_inclusive, required_deltas)
         .into_iter()
         .map(|path| path.location)
         .collect_vec();

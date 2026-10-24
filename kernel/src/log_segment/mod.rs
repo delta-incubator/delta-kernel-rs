@@ -994,44 +994,50 @@ impl LogSegment {
     }
 
     fn find_commit_cover_paths(&self) -> Vec<ParsedLogPath> {
-        self.commit_cover_paths_using(self.listed.ascending_compaction_files.iter())
-    }
-
-    /// Like [`Self::find_commit_cover_paths`], but never uses a log compaction that spans any of
-    /// `versions`, so the cover reads those commits as their own files.
-    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-    fn find_commit_cover_paths_with_commit_versions(
-        &self,
-        versions: &[Version],
-    ) -> Vec<ParsedLogPath> {
-        let spans_version = |compaction: &&ParsedLogPath| {
-            matches!(
-                compaction.file_type,
-                LogPathFileType::CompactedCommit { hi }
-                    if versions.iter().any(|v| (compaction.version..=hi).contains(v))
-            )
-        };
-        self.commit_cover_paths_using(
-            self.listed
-                .ascending_compaction_files
-                .iter()
-                .filter(|compaction| !spans_version(compaction)),
+        Self::commit_cover_paths_using(
+            self.listed.ascending_commit_files.iter(),
+            self.listed.ascending_compaction_files.iter(),
         )
     }
 
-    /// The commit cover over this segment's commits and the ascending `compactions`.
+    /// The commit cover over versions in `(oldest_exclusive, newest_inclusive]`, in descending
+    /// order. Each of `required_deltas` is read as its own commit file, never through a log
+    /// compaction.
+    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+    fn find_commit_cover_paths_in_range(
+        &self,
+        oldest_exclusive: Option<Version>,
+        newest_inclusive: Version,
+        required_deltas: &[Version],
+    ) -> Vec<ParsedLogPath> {
+        let (commits, compactions) =
+            self.filtered_commits_and_compactions(oldest_exclusive, newest_inclusive);
+        let spans_required_delta = |compaction: &&ParsedLogPath| {
+            matches!(
+                compaction.file_type,
+                LogPathFileType::CompactedCommit { hi }
+                    if required_deltas.iter().any(|v| (compaction.version..=hi).contains(v))
+            )
+        };
+        Self::commit_cover_paths_using(
+            commits.iter(),
+            compactions
+                .iter()
+                .filter(|compaction| !spans_required_delta(compaction)),
+        )
+    }
+
+    /// The commit cover over the ascending `commits` and `compactions`.
     fn commit_cover_paths_using<'a>(
-        &'a self,
+        commits: impl Iterator<Item = &'a ParsedLogPath>,
         compactions: impl Iterator<Item = &'a ParsedLogPath>,
     ) -> Vec<ParsedLogPath> {
         // Create an iterator sorted in ascending order by (initial version, end version), e.g.
         // [00.json, 00.09.compacted.json, 00.99.compacted.json, 01.json, 02.json, ..., 10.json,
         //  10.19.compacted.json, 11.json, ...]
-        let all_files = itertools::Itertools::merge_by(
-            self.listed.ascending_commit_files.iter(),
-            compactions,
-            |path_a, path_b| path_a.version <= path_b.version,
-        );
+        let all_files = itertools::Itertools::merge_by(commits, compactions, |path_a, path_b| {
+            path_a.version <= path_b.version
+        });
 
         let mut last_pushed: Option<&ParsedLogPath> = None;
 

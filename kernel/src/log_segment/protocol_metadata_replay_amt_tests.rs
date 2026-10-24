@@ -501,11 +501,8 @@ async fn plan_replay_without_pointer_skips_older_checkpoint_action() {
     assert_replay_resolution(&commits, None, |store| SyncEngine::new_with_store(store)).await;
 }
 
-// The plan path requires the pointed checkpoint action when the newest commit is the manifest
-// commit, or when it reads a listed older one and needs that action's P&M. So a pointed commit
-// without a matching action (none at all, one whose content root is at another version, or one only
-// an older manifest commit carries) fails the build rather than silently dropping or substituting
-// the action, as does a newest commit whose own action the pointer does not name.
+// The plan path fails the build when the checkpoint action it needs is missing or does not match
+// the pointer.
 #[cfg(feature = "declarative-plans")]
 #[rstest]
 #[case::pointed_commit_without_action_and_metadata(
@@ -615,10 +612,8 @@ enum ReplayBound {
     Checkpoint,
 }
 
-// A replay bounded by a CRC or a checkpoint file runs one P&M plan, where an unbounded replay of
-// these commits would run two. That plan still resolves the newest commit's `lastManifestCommit`,
-// reading the newest commit itself when a log compaction (which drops commitInfo) covers it, and
-// takes no pointer from an older commit when the newest one has no commitInfo.
+// A replay bounded by a CRC or a checkpoint file runs one P&M plan, which still resolves the
+// newest commit's `lastManifestCommit`.
 #[cfg(feature = "declarative-plans")]
 #[rstest]
 #[tokio::test]
@@ -684,10 +679,8 @@ async fn plan_replay_bounded_by_crc_or_checkpoint_runs_one_plan(
     assert_eq!(plans.lock().unwrap().len(), 1);
 }
 
-// The plan path reads the newest commit first and stops there when its P&M are final. Otherwise it
-// runs one more plan over the older commits, never the newest again, which captures the pointed
-// checkpoint action when the newest commit lacks it. Each case lists the commit versions each plan
-// scans.
+// An unbounded plan replay reads the newest commit alone, then the older commits only when the
+// newest commit's P&M are not final. Each case lists the commit versions each plan scans.
 #[cfg(feature = "declarative-plans")]
 #[rstest]
 #[case::newest_commit_is_the_manifest_commit(
@@ -1287,12 +1280,9 @@ async fn check_pointer_after_newest_commit<E: Engine>(
     );
 }
 
-// Log compaction files drop commitInfo and here also the checkpoint action, so the plan path reads
-// the newest commit and the pointed manifest commit themselves rather than through a compaction
-// covering them, and still captures the action carrying the latest P&M. Compaction listing is
-// disabled, so the compaction is added by hand. Cases:
-// - the compaction covers both the newest commit and the manifest commit it points at;
-// - the compaction covers the manifest commit inside the replayed range, past its content root.
+// The plan path reads the newest commit and the pointed manifest commit as their own files, not
+// through a log compaction covering them. Compaction listing is disabled, so the compaction is
+// added by hand.
 #[cfg(feature = "declarative-plans")]
 #[rstest]
 #[case::covers_newest_and_manifest_commit(
