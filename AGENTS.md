@@ -403,7 +403,7 @@ Keep this list updated when new protocol features are added to kernel.
 ## Comment & Doc Style
 
 - MUST include doc comments for all public functions, structs, enums, and methods.
-- MUST document function parameters, return values, and errors.
+- MUST document function parameters and return values.
 - Doc comments focus on "what" (contract with caller) more than "how" (implementation),
   unless the "how" meaningfully impacts the "what".
 - Code comments state intent and explain "why": don't restate what the code self-documents.
