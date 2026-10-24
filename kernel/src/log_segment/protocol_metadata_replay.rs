@@ -47,9 +47,9 @@ use crate::schema::{
     column_name, schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
     StructField, StructType,
 };
-use crate::{
-    version_as_i64, Engine, EngineData, KernelError, KernelResult, KernelResultIterator, Version,
-};
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::Version;
+use crate::{version_as_i64, Engine, EngineData, KernelError, KernelResult, KernelResultIterator};
 
 impl LogSegment {
     /// Read the latest Protocol and Metadata from this log segment, using CRC when available.
@@ -186,10 +186,6 @@ impl LogSegment {
         #[cfg(feature = "adaptive-metadata-in-dev")]
         if let Some(pointer) = self.required_checkpoint_pointer_to_read(&replayed) {
             let checkpoint = self.read_last_checkpoint_action_from_pointer(engine, &pointer)?;
-            // TODO(#2337): a log compaction batch ranks at its start version, so one that spans
-            // the pointed commit and also holds a later P&M change loses to the pointed action's
-            // older P&M. Once compactions are listed, replay the original commits after the
-            // pointed version instead, as delta-io/delta#7825 requires.
             return Ok(replayed.with_checkpoint(checkpoint));
         }
         Ok(replayed)
@@ -419,20 +415,25 @@ impl LogSegment {
         let batches = newest_commit.chain(batches);
         Ok(batches.map(move |batch| {
             let batch = batch?;
-            // A commit's version is parsed from its `_file`; a checkpoint batch uses the constant.
-            let version = if batch.is_log_batch {
-                batch_version(batch.actions.as_ref())? as i64
+            // A log file's versions are parsed from its `_file`; a checkpoint batch uses the
+            // constant. A log compaction holds the P&M in effect at its last version, so it ranks
+            // there.
+            let (first_version, rank_version) = if batch.is_log_batch {
+                let path = batch_log_path(batch.actions.as_ref())?;
+                (path.version as i64, path.last_version() as i64)
             } else {
-                checkpoint_version.ok_or_else(|| {
+                let version = checkpoint_version.ok_or_else(|| {
                     KernelError::internal_error("checkpoint batch without a version")
-                })?
+                })?;
+                (version, version)
             };
             #[cfg(feature = "adaptive-metadata-in-dev")]
             let newest_commit_version =
-                (batch.is_log_batch && version == end_version_i64).then_some(end_version);
+                (batch.is_log_batch && first_version == end_version_i64).then_some(end_version);
             Ok(VersionedBatch {
-                protocol_version: Some(version),
-                metadata_version: Some(version),
+                protocol_version: Some(rank_version),
+                metadata_version: Some(rank_version),
+                first_version: Some(first_version),
                 #[cfg(feature = "adaptive-metadata-in-dev")]
                 newest_commit_version,
                 #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -827,6 +828,8 @@ impl PmCandidate {
 struct VersionedBatch {
     protocol_version: Option<i64>,
     metadata_version: Option<i64>,
+    /// The oldest version the batch covers, if known. Every later batch is older than it.
+    first_version: Option<i64>,
     /// The version of the segment's newest commit when the batch comes from it; only that
     /// commit's `lastManifestCommit` describes the segment's version.
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -851,13 +854,13 @@ fn resolve_pm_batches(
         let VersionedBatch {
             protocol_version,
             metadata_version,
+            first_version,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             newest_commit_version,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             captures_checkpoint,
             batch,
         } = batch?;
-        let batch_version = protocol_version.max(metadata_version);
         let candidate = pm_candidate(
             &batch,
             protocol_version,
@@ -887,7 +890,7 @@ fn resolve_pm_batches(
             }
             if resolved.checkpoint.is_none()
                 && batch.is_log_batch
-                && batch_version == Some(pointer.version)
+                && first_version == Some(pointer.version)
             {
                 if let Some(checkpoint) =
                     CheckpointAction::try_new_from_data(batch.actions.as_ref())?
@@ -898,15 +901,15 @@ fn resolve_pm_batches(
             }
         }
         // A checkpoint action's P&M can be older than its commit, so check version not presence.
-        if resolved.is_final_at(batch_version) {
+        if resolved.is_final_at(first_version) {
             break;
         }
     }
     Ok(resolved)
 }
 
-/// Parses the log version from a batch's `_file` metadata column.
-fn batch_version(data: &dyn EngineData) -> KernelResult<Version> {
+/// Parses the log file a batch came from out of its `_file` metadata column.
+fn batch_log_path(data: &dyn EngineData) -> KernelResult<ParsedLogPath<Url>> {
     #[derive(Default)]
     struct FilePathVisitor {
         file: Option<String>,
@@ -936,14 +939,13 @@ fn batch_version(data: &dyn EngineData) -> KernelResult<Version> {
     let url = Url::parse(&file)
         .map_err(|e| KernelError::internal_error(format!("batch has invalid _file {file}: {e}")))?;
     ParsedLogPath::try_from(url)?
-        .map(|path| path.version)
         .ok_or_else(|| KernelError::internal_error(format!("batch from non-log file {file}")))
 }
 
-/// Whether `winner` is set at a version at least `batch_version`.
-fn is_final<T>(winner: &Option<(i64, T)>, batch_version: Option<i64>) -> bool {
-    match (winner, batch_version) {
-        (Some((version, _)), Some(bv)) => *version >= bv,
+/// Whether `winner` is set at a version at least `first_version`, so no older batch can replace it.
+fn is_final<T>(winner: &Option<(i64, T)>, first_version: Option<i64>) -> bool {
+    match (winner, first_version) {
+        (Some((version, _)), Some(first)) => *version >= first,
         _ => false,
     }
 }
@@ -1120,6 +1122,8 @@ fn versioned_plan_batch(
     Ok(VersionedBatch {
         protocol_version: visitor.protocol,
         metadata_version: visitor.metadata,
+        // The aggregate spans the whole plan input, so no older batch follows it.
+        first_version: None,
         #[cfg(feature = "adaptive-metadata-in-dev")]
         newest_commit_version: match newest_commit_version {
             Some(version) if visitor.commit_info == Some(version_as_i64(version)?) => Some(version),
