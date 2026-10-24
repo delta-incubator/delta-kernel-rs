@@ -10,7 +10,7 @@ use delta_kernel::scan::state::ScanFile;
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::table_features::{Operation, TableFeature};
 use delta_kernel::transaction::BoundWriteContext;
-use delta_kernel::{Engine, KernelError, Result};
+use delta_kernel::{Engine, KernelError, KernelResult};
 
 use super::deletion_vector::{DvDescriptorMap, ExclusiveDvDescriptorMap};
 use super::write_context::SharedWriteContext;
@@ -35,23 +35,28 @@ pub struct FfiDeletionVectorUpdate {
 /// and allocates errors. The operation reads snapshot metadata once and merges each file's existing
 /// deleted indexes with the requested indexes. It does not read or rewrite business Parquet data.
 ///
+/// The write context and the transaction receiving the returned map must come from `snapshot`.
+/// Only table-root equality is checked here; snapshot consistency is the connector's
+/// responsibility.
+///
 /// Returns an owned descriptor map. Pass it to `update_table_txn_update_deletion_vectors` with a
 /// metadata iterator from the same snapshot, or release it with `free_dv_descriptor_map`.
-/// No actions are staged or committed. An empty batch returns an empty map.
+/// All merged vectors are prepared in memory and serialized into one shared DV file before upload.
+/// No actions are staged or committed. An empty batch returns an empty map without uploading a
+/// file.
 ///
 /// # Errors
 ///
 /// Returns an error for unsupported/disabled DVs, mismatched table roots, duplicate or inactive
 /// paths, missing physical row counts, invalid row indexes, malformed input, or storage failures.
-/// Input paths and requested indexes are validated before uploading any DV. A later existing-DV
-/// read or upload failure can leave uncommitted DV files; the connector must retain them until
-/// safe orphan cleanup. No partially prepared map is returned on error.
+/// Input paths, requested indexes, and all existing DVs are validated before upload. A failed
+/// upload can leave an uncommitted DV file; the connector must retain it until safe orphan cleanup.
+/// No partially prepared map is returned on error.
 ///
 /// # Safety
 ///
-/// All handles are borrowed and must be valid. The write context and the transaction receiving the
-/// returned map must come from `snapshot`; a matching table root alone does not establish snapshot
-/// consistency. The update slice, its UTF-8 strings, and its row-index slices must be aligned,
+/// All handles are borrowed and must be valid. The update slice, its UTF-8 strings, and its
+/// row-index slices must be aligned,
 /// initialized, readable, and remain valid for this call. Null slice pointers are valid only for
 /// zero lengths. Kernel does not retain any input memory after returning.
 #[no_mangle]
@@ -79,16 +84,18 @@ struct RequestedFiles<'a> {
     duplicate: Option<String>,
 }
 
-unsafe fn decode_updates(updates: &[FfiDeletionVectorUpdate]) -> Result<HashMap<&str, &[u64]>> {
+unsafe fn decode_updates(
+    updates: &[FfiDeletionVectorUpdate],
+) -> KernelResult<HashMap<&str, &[u64]>> {
     let mut requests = HashMap::with_capacity(updates.len());
     for update in updates {
-        let path: &str = unsafe { TryFromStringSlice::try_from_slice(&update.data_file_path) }?;
-        let indexes = unsafe { update.row_indexes.try_as_slice() }?;
-        if path.is_empty() || indexes.is_empty() {
+        if update.data_file_path.len == 0 || update.row_indexes.len == 0 {
             return Err(KernelError::generic(
                 "DV update paths and row-index slices must be nonempty",
             ));
         }
+        let path: &str = unsafe { TryFromStringSlice::try_from_slice(&update.data_file_path) }?;
+        let indexes = unsafe { update.row_indexes.try_as_slice() }?;
         if requests.insert(path, indexes).is_some() {
             return Err(KernelError::generic(format!(
                 "duplicate DV update path: {path}"
@@ -103,7 +110,7 @@ fn write_deletion_vectors_impl(
     context: &BoundWriteContext,
     indexes: HashMap<&str, &[u64]>,
     engine: &dyn Engine,
-) -> Result<DvDescriptorMap> {
+) -> KernelResult<DvDescriptorMap> {
     if snapshot.table_root() != context.table_root_dir() {
         return Err(KernelError::generic(
             "DV snapshot and write context have different table roots",
@@ -147,6 +154,7 @@ fn write_deletion_vectors_impl(
         validate_rows(path, indexes, physical_row_count(file)?)?;
     }
 
+    let mut prepared = Vec::with_capacity(requested.indexes.len());
     for (path, indexes) in requested.indexes {
         let file = requested
             .files
@@ -166,18 +174,21 @@ fn write_deletion_vectors_impl(
             dv.add_deleted_row_indexes(previous);
         }
         dv.add_deleted_row_indexes(indexes);
+        prepared.push((path, dv));
+    }
 
-        let dv_path = context.new_deletion_vector_path(String::new());
-        let mut bytes = Vec::new();
-        let mut writer = StreamingDeletionVectorWriter::new(&mut bytes);
+    let dv_path = context.new_deletion_vector_path(String::new());
+    let mut bytes = Vec::new();
+    let mut writer = StreamingDeletionVectorWriter::new(&mut bytes);
+    for (path, dv) in prepared {
         let result = writer.write_deletion_vector(dv)?;
-        writer.finalize()?;
-        engine
-            .storage_handler()
-            .put(&dv_path.absolute_path()?, bytes.into(), false)?;
         map.inner
             .insert(path.to_owned(), result.to_descriptor(&dv_path));
     }
+    writer.finalize()?;
+    engine
+        .storage_handler()
+        .put(&dv_path.absolute_path()?, bytes.into(), false)?;
     Ok(map)
 }
 
@@ -190,7 +201,7 @@ fn select_file(requested: &mut RequestedFiles<'_>, file: ScanFile) {
     }
 }
 
-fn physical_row_count(file: &ScanFile) -> Result<u64> {
+fn physical_row_count(file: &ScanFile) -> KernelResult<u64> {
     file.stats
         .as_ref()
         .map(|stats| stats.num_records)
@@ -202,7 +213,7 @@ fn physical_row_count(file: &ScanFile) -> Result<u64> {
         })
 }
 
-fn validate_rows(path: &str, rows: &[u64], num_records: u64) -> Result<()> {
+fn validate_rows(path: &str, rows: &[u64], num_records: u64) -> KernelResult<()> {
     if let Some(index) = rows.iter().find(|index| **index >= num_records) {
         return Err(KernelError::generic(format!(
             "DV row index {index} is outside physical row count {num_records} for {path}",
@@ -237,8 +248,7 @@ mod tests {
     use crate::transaction::write_context::free_write_context;
     use crate::transaction::{
         committed_transaction_version, free_committed_transaction, free_update_table_txn,
-        new_update_table_txn_builder, update_table_txn_builder_build,
-        update_table_txn_builder_with_operation, update_table_txn_commit,
+        new_update_table_txn_builder, update_table_txn_builder_build, update_table_txn_commit,
         update_table_txn_update_deletion_vectors, KernelUpdateTableOperation,
     };
     use crate::{free_engine, free_snapshot, kernel_string_slice};
@@ -264,7 +274,7 @@ mod tests {
             let kernel_engine: Arc<dyn Engine> =
                 Arc::new(DefaultEngineBuilder::new(store.clone()).build());
             let schema = schema_ref! { nullable "id": INTEGER };
-            create_table(&table_url, schema, "ffi-dv-writer-test")
+            create_table(&table_url, schema, "ffi-dv-writer-test", true)
                 .with_table_properties([(
                     "delta.enableDeletionVectors",
                     if enabled { "true" } else { "false" },
@@ -274,8 +284,7 @@ mod tests {
                 .unwrap_committed();
             let snapshot = Snapshot::builder_for(&table_url).build(kernel_engine.as_ref())?;
             let mut transaction = snapshot
-                .transaction_builder()
-                .with_operation(UpdateTableOperation::Write)
+                .update_table(UpdateTableOperation::Write, "ffi-dv-writer-test", true)
                 .build(kernel_engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
             let mut metadata = Vec::new();
             for (path, ids) in [
@@ -310,8 +319,7 @@ mod tests {
                 .unwrap_post_commit_snapshot();
             let context = snapshot
                 .clone()
-                .transaction_builder()
-                .with_operation(UpdateTableOperation::Merge)
+                .update_table(UpdateTableOperation::Merge, "ffi-dv-writer-test", true)
                 .build(kernel_engine.as_ref(), Box::new(FileSystemCommitter::new()))?
                 .write_state()?
                 .write_context_builder()
@@ -345,7 +353,7 @@ mod tests {
                 .storage_handler()
                 .list_from(&self.table_url)
                 .unwrap()
-                .collect::<Result<Vec<_>>>()
+                .collect::<KernelResult<Vec<_>>>()
                 .unwrap()
                 .iter()
                 .filter(|file| file.location.as_str().contains("deletion_vector_"))
@@ -376,8 +384,7 @@ mod tests {
                 Snapshot::builder_for(&self.table_url).build(self.kernel_engine.as_ref())?;
             let context = snapshot
                 .clone()
-                .transaction_builder()
-                .with_operation(UpdateTableOperation::Merge)
+                .update_table(UpdateTableOperation::Merge, "ffi-dv-writer-test", true)
                 .build(
                     self.kernel_engine.as_ref(),
                     Box::new(FileSystemCommitter::new()),
@@ -400,10 +407,16 @@ mod tests {
             new_rows: Option<(&str, Vec<i32>)>,
         ) -> TestResult<()> {
             let snapshot_version = unsafe { self.snapshot.as_ref() }.version();
-            let builder = unsafe { new_update_table_txn_builder(self.snapshot.shallow_copy()) };
-            let builder = unsafe {
-                update_table_txn_builder_with_operation(builder, KernelUpdateTableOperation::Merge)
-            };
+            let engine_info = "ffi-dv-writer-test";
+            let builder = ok_or_panic(unsafe {
+                new_update_table_txn_builder(
+                    self.snapshot.shallow_copy(),
+                    KernelUpdateTableOperation::Merge,
+                    kernel_string_slice!(engine_info),
+                    true,
+                    self.engine.shallow_copy(),
+                )
+            });
             let mut transaction_handle = ok_or_panic(unsafe {
                 update_table_txn_builder_build(builder, self.engine.shallow_copy())
             });
@@ -515,7 +528,11 @@ mod tests {
         };
         let map = ok_or_panic(fixture.prepare(&entries));
         assert_eq!(unsafe { map.as_ref() }.inner.len(), 2);
-        assert_eq!(fixture.dv_count(), 2);
+        let first = &unsafe { map.as_ref() }.inner["first.parquet"];
+        let second = &unsafe { map.as_ref() }.inner["second.parquet"];
+        assert_eq!(first.path_or_inline_dv, second.path_or_inline_dv);
+        assert_ne!(first.offset, second.offset);
+        assert_eq!(fixture.dv_count(), 1);
         assert_eq!(fixture.visible_ids()?, vec![10, 20, 30, 40, 50, 60]);
         fixture
             .commit(map, Some(("new.parquet", vec![20, 30, 70])))
@@ -653,6 +670,31 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn null_empty_file_path_is_rejected_without_uploading_or_consuming_handles(
+    ) -> TestResult<()> {
+        let fixture = Fixture::new(true).await?;
+        let mut update = unsafe { entry("first.parquet", &[1]) };
+        update.data_file_path = KernelStringSlice {
+            ptr: ptr::null(),
+            len: 0,
+        };
+        match fixture.prepare(&[update]) {
+            ExternResult::Err(error) => {
+                assert!(unsafe { recover_error(error) }.message.contains("nonempty"));
+            }
+            ExternResult::Ok(map) => {
+                unsafe { super::super::free_dv_descriptor_map(map) };
+                panic!("null empty file path succeeded");
+            }
+        }
+        assert_eq!(fixture.dv_count(), 0);
+        let entries = unsafe { [entry("first.parquet", &[1])] };
+        let map = ok_or_panic(fixture.prepare(&entries));
+        unsafe { super::super::free_dv_descriptor_map(map) };
+        Ok(())
+    }
+
     #[rstest]
     #[case::unreadable(false)]
     #[case::wrong_cardinality(true)]
@@ -697,6 +739,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_last_existing_dv_does_not_upload_prepared_vectors() -> TestResult<()> {
+        let mut fixture = Fixture::new(true).await?;
+        let first_rows: &[u64] = &[2];
+        let second_rows: &[u64] = &[1];
+        let indexes = HashMap::from([
+            ("first.parquet", first_rows),
+            ("second.parquet", second_rows),
+        ]);
+        // Select the last entry in this map's iteration order so a valid DV is prepared first.
+        let invalid_path = *indexes.keys().last().unwrap();
+        let entries = unsafe { [entry("first.parquet", &[1]), entry("second.parquet", &[0])] };
+        let mut map = ok_or_panic(fixture.prepare(&entries));
+        unsafe { map.as_mut() }
+            .inner
+            .get_mut(invalid_path)
+            .unwrap()
+            .cardinality += 1;
+        fixture.commit(map, None).await?;
+        fixture.refresh()?;
+        let count = fixture.dv_count();
+
+        let snapshot = unsafe { fixture.snapshot.clone_as_arc() };
+        let context = unsafe { fixture.context.as_ref() };
+        let error = match write_deletion_vectors_impl(
+            snapshot,
+            context,
+            indexes,
+            fixture.kernel_engine.as_ref(),
+        ) {
+            Ok(_) => panic!("invalid final DV was ignored"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("cardinality"), "{error}");
+        assert_eq!(fixture.dv_count(), count);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stale_preparation_conflicts_and_fresh_preparation_preserves_both_deletes(
     ) -> TestResult<()> {
         let mut fixture = Fixture::new(true).await?;
@@ -724,10 +804,16 @@ mod tests {
         let engine = engine_handle_for_store(fixture.store.clone());
         let snapshot: Handle<SharedSnapshot> = unsafe { fixture.snapshot.clone_as_arc() }.into();
         let table_root = fixture.table_url.clone();
-        let builder = unsafe { new_update_table_txn_builder(snapshot.shallow_copy()) };
-        let builder = unsafe {
-            update_table_txn_builder_with_operation(builder, KernelUpdateTableOperation::Merge)
-        };
+        let engine_info = "ffi-dv-writer-test";
+        let builder = ok_or_panic(unsafe {
+            new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Merge,
+                kernel_string_slice!(engine_info),
+                true,
+                engine.shallow_copy(),
+            )
+        });
         let transaction =
             ok_or_panic(unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) });
         unsafe { free_snapshot(snapshot) };
