@@ -12,17 +12,24 @@
 //!
 //! As with all fields in Iceberg, statistics are projected by field ID.
 
+use std::mem;
+use std::sync::Arc;
+
 use tracing::warn;
 
-use crate::actions::{MAX_VALUES, MIN_VALUES, NULL_COUNT};
+use crate::actions::{
+    MAX_VALUES, MIN_VALUES, NULL_COUNT, NUM_RECORDS, STATS_PARSED,
+    TIGHT_BOUNDS as DELTA_TIGHT_BOUNDS,
+};
 use crate::content_tree::{
-    LOWER_BOUND, NAN_VALUE_COUNT, NULL_VALUE_COUNT, TIGHT_BOUNDS, TOTAL_BYTES, UPPER_BOUND,
-    VALUE_COUNT,
+    CONTENT_STATS_FIELD_NAME, LOWER_BOUND, NAN_VALUE_COUNT, NULL_VALUE_COUNT, RECORD_COUNT,
+    TIGHT_BOUNDS, TOTAL_BYTES, UPPER_BOUND, VALUE_COUNT,
 };
-use crate::expressions::ColumnName;
+use crate::expressions::{lit, null_lit, ColumnName, Expression, ExpressionRef, Predicate};
 use crate::schema::{
-    ColumnMetadataKey, DataType, MetadataValue, PrimitiveType, StructField, StructType,
+    ColumnMetadataKey, DataType, MetadataValue, PrimitiveType, SchemaRef, StructField, StructType,
 };
+use crate::struct_patch::ProjectionStructPatchBuilder;
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::{KernelError, KernelResult};
 
@@ -167,6 +174,11 @@ impl StatCategories {
     /// Whether the leaf appears in at least one category (i.e. survives the projection).
     fn any(&self) -> bool {
         self.null_count || self.min_values || self.max_values
+    }
+
+    /// Category membership indexed like [`STAT_CATEGORIES`].
+    fn as_array(&self) -> [bool; 3] {
+        [self.null_count, self.min_values, self.max_values]
     }
 }
 
@@ -460,60 +472,109 @@ impl<'a> CategoryScopes<'a> {
     }
 }
 
-/// Drives the table-schema walk for AMT `content_stats` schema generation
-/// ([`collect_stats_schema`]): it descends structs, threads the optional Delta stat projection
-/// through each descent, and invokes `on_leaf` once for every non-struct leaf the projection did
-/// not drop, with the leaf field, its root-to-leaf path, and its category membership (`None` when
-/// not projecting). Stat-eligibility (field IDs, geospatial, array/map producing no stats) is left
-/// to the sink. A leaf that a projection drops entirely (present in no category) is skipped before
-/// `on_leaf` is called.
+/// A fold over the table schema driven by [`StatsLeafWalker`]: every surviving leaf and every
+/// struct becomes an [`Output`](Self::Output), with a struct's output built from its children's.
+/// `path` runs from the root to the visited field (its last segment is the field itself).
+trait StatsLeafVisitor<'a> {
+    type Output;
+
+    /// Folds a non-struct leaf the projection does not drop. `categories` is the leaf's category
+    /// membership, or `None` when not projecting.
+    fn on_leaf(
+        &self,
+        field: &'a StructField,
+        path: &[String],
+        categories: Option<StatCategories>,
+    ) -> KernelResult<Self::Output>;
+
+    /// Folds a struct field from its surviving children's outputs, in field order. Called for every
+    /// struct, so `children` is empty for an empty struct or one whose leaves the projection drops
+    /// entirely. `projection` is the struct's own scope, or `None` when not projecting.
+    fn on_struct(
+        &self,
+        field: &'a StructField,
+        path: &[String],
+        projection: Option<&CategoryScopes<'a>>,
+        children: Vec<Self::Output>,
+    ) -> KernelResult<Self::Output>;
+}
+
+/// Drives a [`StatsLeafVisitor`] fold over a table schema for AMT `content_stats` generation: it
+/// descends structs, threads the optional Delta stat projection through each descent, and drops a
+/// leaf that a projection omits from every category before the visitor sees it. Stat-eligibility
+/// (field IDs, geospatial, array/map producing no stats) is left to the visitor.
 ///
-/// Uses the `KernelResult<()>` carrier: the rebuilt output is discarded, the `on_leaf` sink
-/// is the real result, and an `Err` short-circuits the walk.
-struct StatsLeafWalker<'a, F> {
-    /// Field names from the root to the current node; the last segment is the leaf being visited.
+/// Uses the `KernelResult<()>` carrier: the rebuilt schema is discarded, the folded outputs
+/// accumulate in `outputs`, and an `Err` short-circuits the walk.
+struct StatsLeafWalker<'a, 'v, V: StatsLeafVisitor<'a>> {
+    /// Field names from the root to the current node; the last segment is the field being visited.
     path: Vec<String>,
     /// Delta stat categories in scope at the current position, or `None` to visit every leaf.
     projection: Option<CategoryScopes<'a>>,
-    /// Invoked once per surviving leaf with `(field, path, categories)`.
-    on_leaf: F,
+    /// Outputs of the current struct's already-visited fields, in field order.
+    outputs: Vec<V::Output>,
+    visitor: &'v V,
 }
 
-impl<'a, F> SchemaTransform<'a> for StatsLeafWalker<'a, F>
-where
-    F: FnMut(&'a StructField, &[String], Option<StatCategories>) -> KernelResult<()>,
-{
+impl<'a, 'v, V: StatsLeafVisitor<'a>> StatsLeafWalker<'a, 'v, V> {
+    /// Folds `table_struct` with `visitor` under the optional Delta stat `projection`, returning
+    /// the top-level fields' outputs in field order.
+    ///
+    /// Errors if the visitor errors, or if the projection is a scalar where the table nests a
+    /// struct (see [`CategoryScopes::descend`]).
+    fn walk(
+        table_struct: &'a StructType,
+        projection: Option<CategoryScopes<'a>>,
+        visitor: &'v V,
+    ) -> KernelResult<Vec<V::Output>> {
+        let mut walker = Self {
+            path: Vec::new(),
+            projection,
+            outputs: Vec::new(),
+            visitor,
+        };
+        walker.transform_struct(table_struct)?;
+        Ok(walker.outputs)
+    }
+}
+
+impl<'a, V: StatsLeafVisitor<'a>> SchemaTransform<'a> for StatsLeafWalker<'a, '_, V> {
     transform_output_type!(|'a, T| KernelResult<()>);
 
     fn transform_struct_field(&mut self, field: &'a StructField) -> KernelResult<()> {
         self.path.push(field.name().to_string());
-        // Descend into structs; every other type is a leaf. On `Err` the walk aborts and `path` is
-        // discarded, so the skipped pop is harmless.
-        let result = if let DataType::Struct(_) = field.data_type() {
-            // The stat-category scopes step into this struct's sub-schema and are restored on the
-            // way back up so siblings are unaffected. A category that is a scalar where the table
-            // nests a struct (an internal invariant violation) aborts the walk here.
+        // Descend into structs; every other type is a leaf. On `Err` the walk aborts and `walk`
+        // drops the walker, so the skipped `path` pop and state restores are harmless.
+        if let DataType::Struct(_) = field.data_type() {
+            // The stat-category scopes step into this struct's sub-schema, and the parent's scope
+            // and sibling outputs are restored on the way back up. A category that is a scalar
+            // where the table nests a struct (an internal invariant violation) aborts the walk.
             let saved_projection = self.projection;
             self.projection = self
                 .projection
                 .map(|s| s.descend(field.name(), &self.path))
                 .transpose()?;
-            let result = self.recurse_into_struct_field(field);
+            let siblings = mem::take(&mut self.outputs);
+            self.recurse_into_struct_field(field)?;
+            let children = mem::replace(&mut self.outputs, siblings);
+            let output =
+                self.visitor
+                    .on_struct(field, &self.path, self.projection.as_ref(), children)?;
+            self.outputs.push(output);
             self.projection = saved_projection;
-            result
         } else {
             // Every non-struct type is a leaf -- including variants (never descended into: their
-            // inner fields carry no field IDs) and array/map columns (which produce no stats). When
-            // projecting, a leaf absent from every category is dropped here.
+            // inner fields carry no field IDs) and array/map columns (values nested in a list or
+            // map carry no `content_stats` entry, matching Iceberg). When projecting, a leaf
+            // absent from every category is dropped here.
             let categories = self.projection.map(|s| s.leaf_categories(field.name()));
-            if categories.is_some_and(|c| !c.any()) {
-                Ok(())
-            } else {
-                (self.on_leaf)(field, &self.path, categories)
+            if categories.is_none_or(|c| c.any()) {
+                let output = self.visitor.on_leaf(field, &self.path, categories)?;
+                self.outputs.push(output);
             }
-        };
+        }
         self.path.pop();
-        result
+        Ok(())
     }
 }
 
@@ -577,32 +638,332 @@ fn collect_stats_schema<'a>(
     table_struct: &'a StructType,
     projection: Option<CategoryScopes<'a>>,
 ) -> KernelResult<StructType> {
-    let mut fields: Vec<StructField> = Vec::new();
-    {
-        let mut walker = StatsLeafWalker {
-            path: Vec::new(),
-            projection,
-            on_leaf: |field: &'a StructField, path: &[String], categories| {
-                leaf_stats_field(field, path, categories).map(|stats| fields.extend(stats))
-            },
-        };
-        walker.transform_struct(table_struct)?;
-    }
+    let fields = StatsLeafWalker::walk(table_struct, projection, &StatsSchemaCollector)?;
     // `new_unchecked` skips name dedup; safe because `ColumnName`'s `Display` is lossless -- a leaf
     // whose name contains a dot is backtick-escaped, so it never collides with a nested path.
-    Ok(StructType::new_unchecked(fields))
+    Ok(StructType::new_unchecked(fields.into_iter().flatten()))
+}
+
+/// Folds each leaf into its flat `content_stats` field (see [`leaf_stats_field`]) and each struct
+/// into its children's fields, so the walk yields the flat list.
+struct StatsSchemaCollector;
+
+impl<'a> StatsLeafVisitor<'a> for StatsSchemaCollector {
+    type Output = Vec<StructField>;
+
+    fn on_leaf(
+        &self,
+        field: &'a StructField,
+        path: &[String],
+        categories: Option<StatCategories>,
+    ) -> KernelResult<Vec<StructField>> {
+        Ok(leaf_stats_field(field, path, categories)?
+            .into_iter()
+            .collect())
+    }
+
+    fn on_struct(
+        &self,
+        _field: &'a StructField,
+        _path: &[String],
+        _projection: Option<&CategoryScopes<'a>>,
+        children: Vec<Vec<StructField>>,
+    ) -> KernelResult<Vec<StructField>> {
+        Ok(children.into_iter().flatten().collect())
+    }
+}
+
+// == AMT content_stats -> parsed Delta stats ==
+
+/// Builds an expression that replaces the flat AMT [`CONTENT_STATS_FIELD_NAME`] column of
+/// `input_schema` with a parsed Delta stats column named [`STATS_PARSED`], passing every other
+/// column through.
+///
+/// Returns `(output_schema, expression)`: `output_schema` is `input_schema` with `content_stats`
+/// replaced by a nullable `stats_parsed` column of type `delta_stats_schema`, and `expression`
+/// evaluates rows of `input_schema` into `output_schema`.
+///
+/// The output column has the shape of `delta_stats_schema`:
+///
+/// ```text
+/// numRecords:  long               <- recordCount
+/// nullCount:   {<table nesting>}  <- content_stats.<leaf>.null_value_count
+/// minValues:   {<table nesting>}  <- content_stats.<leaf>.lower_bound
+/// maxValues:   {<table nesting>}  <- content_stats.<leaf>.upper_bound
+/// tightBounds: boolean            <- AND of content_stats.<leaf>.tight_bounds
+/// ```
+///
+/// `content_stats` must have been read with [`projected_stats_schema`] for the same `table_schema`
+/// and `delta_stats_schema`: both are produced by the same table walk, so leaf names always agree.
+///
+/// Per-column `tight_bounds` collapse into one file-level `tightBounds`, where a null per-column
+/// value counts as tight and columns whose Delta bounds are never tight (see
+/// [`tight_bounds_forced_false`]) are skipped. AMT-only stats (`value_count`, `nan_value_count`,
+/// `total_bytes`) are not carried over. A leaf without a `content_stats` entry (array/map columns,
+/// out-of-range field IDs) yields null.
+pub(crate) fn build_parsed_stats_expression(
+    table_schema: &StructType,
+    delta_stats_schema: &StructType,
+    input_schema: &StructType,
+) -> KernelResult<(SchemaRef, ExpressionRef)> {
+    match input_schema
+        .field(CONTENT_STATS_FIELD_NAME)
+        .map(StructField::data_type)
+    {
+        Some(DataType::Struct(_)) => {}
+        other => {
+            return Err(KernelError::generic(format!(
+                "content_stats column '{CONTENT_STATS_FIELD_NAME}' must be a struct in the input \
+                 schema, found: {other:?}"
+            )))
+        }
+    }
+    if input_schema.field(RECORD_COUNT).is_none() {
+        return Err(KernelError::generic(format!(
+            "record count column '{RECORD_COUNT}' not found in input schema"
+        )));
+    }
+
+    let scopes = CategoryScopes::from_delta_stats_schema(delta_stats_schema)?;
+    let root = StatsLeafWalker::walk(table_schema, Some(scopes), &ParsedStatsExprBuilder)?;
+    let stats_expr = assemble_parsed_stats_expr(root, delta_stats_schema, &scopes)?;
+
+    let output_field = StructField::nullable(STATS_PARSED, delta_stats_schema.clone());
+    ProjectionStructPatchBuilder::new(input_schema)
+        .replace(CONTENT_STATS_FIELD_NAME, output_field, Arc::new(stats_expr))
+        .build()
+}
+
+/// The `content_stats` leaf sub-field backing each category, indexed like [`STAT_CATEGORIES`].
+const CATEGORY_SUB_FIELDS: [&str; 3] = [NULL_VALUE_COUNT, LOWER_BOUND, UPPER_BOUND];
+
+/// A built child expression and the name of the output field it fills.
+type NamedExpr<'a> = (&'a str, ExpressionRef);
+
+/// One folded field of the parsed Delta stats expression.
+struct StatsExprNode<'a> {
+    /// The field's name in each category's output struct.
+    name: &'a str,
+    /// The field's expression in each category it appears in, indexed like [`STAT_CATEGORIES`].
+    exprs: [Option<ExpressionRef>; 3],
+    /// One `coalesce(tight_bounds, true)` per leaf at or under this field that contributes to
+    /// `tightBounds`.
+    tight_bounds: Vec<Predicate>,
+}
+
+/// [`StatsLeafVisitor`] that builds the parsed Delta stats expression. Each leaf's `content_stats`
+/// entry comes from [`leaf_stats_field`], the same function that names it in the read schema.
+struct ParsedStatsExprBuilder;
+
+impl<'a> StatsLeafVisitor<'a> for ParsedStatsExprBuilder {
+    type Output = StatsExprNode<'a>;
+
+    fn on_leaf(
+        &self,
+        field: &'a StructField,
+        path: &[String],
+        categories: Option<StatCategories>,
+    ) -> KernelResult<StatsExprNode<'a>> {
+        let categories = require_projection(categories)?;
+        // The read schema keeps exactly the sub-fields backed by the leaf's categories, so the
+        // entry has every sub-field referenced below.
+        let entry = leaf_stats_field(field, path, Some(categories))?;
+        let present = categories.as_array();
+        let exprs = std::array::from_fn(|i| {
+            present[i].then(|| {
+                let sub_field = CATEGORY_SUB_FIELDS[i];
+                let expr = match &entry {
+                    Some(entry) => {
+                        Expression::column([CONTENT_STATS_FIELD_NAME, entry.name(), sub_field])
+                    }
+                    None if sub_field == NULL_VALUE_COUNT => null_lit(DataType::LONG),
+                    None => null_lit(field.data_type().clone()),
+                };
+                Arc::new(expr)
+            })
+        });
+
+        let contributes_tight_bounds = |entry: &StructField| {
+            let has_tight_bounds = matches!(
+                entry.data_type(),
+                DataType::Struct(s) if s.field(TIGHT_BOUNDS).is_some()
+            );
+            has_tight_bounds && !tight_bounds_forced_false(field.data_type())
+        };
+        let tight_bounds = entry
+            .filter(contributes_tight_bounds)
+            .map(|entry| {
+                let tight =
+                    Expression::column([CONTENT_STATS_FIELD_NAME, entry.name(), TIGHT_BOUNDS]);
+                Predicate::from_expr(Expression::coalesce([tight, lit(true)]))
+            })
+            .into_iter()
+            .collect();
+        Ok(StatsExprNode {
+            name: field.name(),
+            exprs,
+            tight_bounds,
+        })
+    }
+
+    fn on_struct(
+        &self,
+        field: &'a StructField,
+        path: &[String],
+        projection: Option<&CategoryScopes<'a>>,
+        children: Vec<StatsExprNode<'a>>,
+    ) -> KernelResult<StatsExprNode<'a>> {
+        let (exprs, tight_bounds) =
+            combine_children(children, require_projection(projection)?, path)?;
+        Ok(StatsExprNode {
+            name: field.name(),
+            exprs: exprs.map(|expr| expr.map(Arc::new)),
+            tight_bounds,
+        })
+    }
+}
+
+/// Assembles the top-level stats struct expression from the walk's `root` outputs, field for field
+/// with `delta_stats_schema`.
+fn assemble_parsed_stats_expr(
+    root: Vec<StatsExprNode<'_>>,
+    delta_stats_schema: &StructType,
+    scopes: &CategoryScopes<'_>,
+) -> KernelResult<Expression> {
+    let (mut categories, mut tight_bounds) = combine_children(root, scopes, &[])?;
+    let mut fields = Vec::new();
+    for field in delta_stats_schema.fields() {
+        let name = field.name().as_str();
+        let expr = match name {
+            NUM_RECORDS => Expression::column([RECORD_COUNT]),
+            // TODO: revisit this mapping once Iceberg settles on its final tight bounds format.
+            // TODO: force `tightBounds` to false when the entry has a deletion vector, once DVs
+            // are read from content-tree entries.
+            DELTA_TIGHT_BOUNDS => {
+                Expression::from_pred(Predicate::and_from(mem::take(&mut tight_bounds)))
+            }
+            _ => STAT_CATEGORIES
+                .iter()
+                .position(|category| *category == name)
+                .and_then(|i| categories[i].take())
+                .ok_or_else(|| {
+                    KernelError::generic(format!("unexpected top-level Delta stats field '{name}'"))
+                })?,
+        };
+        fields.push(Arc::new(expr));
+    }
+    Ok(Expression::struct_from(fields))
+}
+
+/// Combines a struct's `children` into one struct expression per stat category, and gathers the
+/// children's tight-bounds predicates. `path` locates the struct for error context.
+///
+/// Returns `(exprs, tight_bounds)`. `exprs` is indexed like [`STAT_CATEGORIES`]: entry `i` is a
+/// struct over the children present in category `i`, or `None` when `scopes` omits that category
+/// here (so no leaf under the struct is in it). `tight_bounds` concatenates every child's
+/// predicates.
+///
+/// For example, for `s: struct{a: int, b: string}` with `a` in `nullCount` and `minValues`, `b`
+/// only in `nullCount`, and `s` absent from `maxValues`:
+///
+/// ```text
+/// exprs[nullCount] = Some(struct(a: content_stats.`s.a`.null_value_count,
+///                                b: content_stats.`s.b`.null_value_count))
+/// exprs[minValues] = Some(struct(a: content_stats.`s.a`.lower_bound))
+/// exprs[maxValues] = None
+/// tight_bounds     = [coalesce(content_stats.`s.a`.tight_bounds, true)]
+/// ```
+///
+/// Errors if a category's children don't line up with its sub-schema (see [`aligned_struct_expr`]).
+fn combine_children<'a>(
+    children: Vec<StatsExprNode<'a>>,
+    scopes: &CategoryScopes<'_>,
+    path: &[String],
+) -> KernelResult<([Option<Expression>; 3], Vec<Predicate>)> {
+    let mut per_category: [Vec<NamedExpr<'a>>; 3] = Default::default();
+    let mut tight_bounds = Vec::new();
+    for child in children {
+        for (category, expr) in per_category.iter_mut().zip(child.exprs) {
+            category.extend(expr.map(|expr| (child.name, expr)));
+        }
+        tight_bounds.extend(child.tight_bounds);
+    }
+    let mut exprs = [None, None, None];
+    for (i, children) in per_category.into_iter().enumerate() {
+        if let Some(scope) = scopes.categories[i] {
+            exprs[i] = Some(aligned_struct_expr(children, scope, path, i)?);
+        }
+    }
+    Ok((exprs, tight_bounds))
+}
+
+/// Unwraps projection-derived visitor input, which the parsed stats walk always supplies.
+fn require_projection<T>(projection: Option<T>) -> KernelResult<T> {
+    projection.ok_or_else(|| KernelError::internal_error("parsed stats walk requires a projection"))
+}
+
+/// Wraps a struct's `children` into a struct expression for the category sub-schema `scope`.
+/// `path` and `category` are for error context.
+///
+/// Errors if the children's names don't match `scope`'s fields, in order.
+fn aligned_struct_expr(
+    children: Vec<NamedExpr<'_>>,
+    scope: &StructType,
+    path: &[String],
+    category: usize,
+) -> KernelResult<Expression> {
+    // The evaluator matches struct fields by position, so the children must line up with `scope`.
+    // Both come from the same table walk, so a mismatch is an internal error.
+    let child_names = || children.iter().map(|(name, _)| *name);
+    if !child_names().eq(scope.field_names().map(String::as_str)) {
+        return Err(KernelError::internal_error(format!(
+            "Delta stats category '{}' at '{}' has fields {:?}, but the table walk produced {:?}",
+            STAT_CATEGORIES[category],
+            ColumnName::new(path),
+            scope.field_names().collect::<Vec<_>>(),
+            child_names().collect::<Vec<_>>(),
+        )));
+    }
+    Ok(Expression::struct_from(
+        children.into_iter().map(|(_, expr)| expr),
+    ))
+}
+
+/// Whether Delta may record bounds for `data_type` that are not tight regardless of
+/// `tightBounds`: string, binary, and timestamp bounds may be truncated, and float/double bounds
+/// may include NaN.
+fn tight_bounds_forced_false(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Primitive(
+            PrimitiveType::String
+                | PrimitiveType::Binary
+                | PrimitiveType::Timestamp
+                | PrimitiveType::TimestampNtz
+                | PrimitiveType::Float
+                | PrimitiveType::Double
+        )
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use rstest::rstest;
 
     use super::*;
+    use crate::arrow::array::RecordBatch;
+    use crate::engine::arrow_data::ArrowEngineData;
+    use crate::engine::sync::SyncEngine;
+    use crate::expressions::{Scalar, StructData};
     use crate::scan::data_skipping::stats_schema::{expected_stats_schema, StatsConfig};
     use crate::schema::{ArrayType, MapType};
     #[cfg(feature = "geo-type-in-dev")]
     use crate::schema::{EdgeInterpolationAlgorithm, GeographyType, GeometryType};
     use crate::table_properties::DataSkippingNumIndexedCols;
+    use crate::unit_test_utils::assert_result_error_with_message;
+    use crate::{Engine, EngineData};
 
     #[rstest]
     #[case(0, 10_000)]
@@ -1670,5 +2031,665 @@ mod tests {
             .is_some());
         let projected = projected_stats_schema(&table, &delta).expect("should succeed");
         assert_eq!(projected, expected);
+    }
+
+    // === StatsLeafWalker ===
+
+    /// Renders the walk as `name` per leaf and `name<scope>{children}` per struct, where `<scope>`
+    /// is the struct's `[nullCount|minValues|maxValues]` field names (`-` for an omitted category),
+    /// or empty when not projecting. Records each callback's path and fails at `fail_at`.
+    #[derive(Default)]
+    struct TreeRenderer {
+        visited: RefCell<Vec<String>>,
+        fail_at: Option<&'static str>,
+    }
+
+    impl TreeRenderer {
+        fn visit(&self, path: &[String]) -> KernelResult<()> {
+            let path = ColumnName::new(path).to_string();
+            self.visited.borrow_mut().push(path.clone());
+            if self.fail_at == Some(path.as_str()) {
+                return Err(KernelError::generic(format!(
+                    "injected failure at '{path}'"
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    impl<'a> StatsLeafVisitor<'a> for TreeRenderer {
+        type Output = String;
+
+        fn on_leaf(
+            &self,
+            field: &'a StructField,
+            path: &[String],
+            _categories: Option<StatCategories>,
+        ) -> KernelResult<String> {
+            self.visit(path)?;
+            Ok(field.name().clone())
+        }
+
+        fn on_struct(
+            &self,
+            field: &'a StructField,
+            path: &[String],
+            projection: Option<&CategoryScopes<'a>>,
+            children: Vec<String>,
+        ) -> KernelResult<String> {
+            self.visit(path)?;
+            let scope = projection.map_or(String::new(), |scopes| {
+                let names = scopes.categories.map(|scope| {
+                    scope.map_or("-".to_string(), |s| {
+                        s.field_names().cloned().collect::<Vec<_>>().join(",")
+                    })
+                });
+                format!("[{}]", names.join("|"))
+            });
+            Ok(format!("{}{scope}{{{}}}", field.name(), children.join(",")))
+        }
+    }
+
+    /// `p: struct{x: struct{a: int}, y: struct{b: int}}`.
+    fn sibling_structs() -> StructField {
+        let child = |name: &str, leaf: &str| {
+            StructField::nullable(
+                name,
+                StructType::new_unchecked([StructField::nullable(leaf, DataType::INTEGER)]),
+            )
+        };
+        StructField::nullable(
+            "p",
+            StructType::new_unchecked([child("x", "a"), child("y", "b")]),
+        )
+    }
+
+    #[rstest]
+    #[case::nested_and_sibling_structs(
+        vec![
+            sibling_structs(),
+            StructField::nullable("arr", ArrayType::new(DataType::INTEGER, true)),
+            StructField::nullable("m", MapType::new(DataType::STRING, DataType::INTEGER, true)),
+            StructField::nullable("d", DataType::LONG),
+        ],
+        None,
+        &["p{x{a},y{b}}", "arr", "m", "d"],
+    )]
+    #[case::empty_struct(
+        vec![StructField::nullable("e", StructType::new_unchecked([]))],
+        None,
+        &["e{}"],
+    )]
+    #[case::fully_dropped_struct(
+        vec![
+            StructField::nullable("a", stat_cols(["b"])),
+            StructField::nullable("d", DataType::LONG),
+        ],
+        Some(delta_stats(Some(stat_cols(["d"])), None, None)),
+        &["a[-|-|-]{}", "d"],
+    )]
+    #[case::scope_is_structs_own(
+        vec![sibling_structs()],
+        Some(delta_stats(
+            Some(StructType::new_unchecked([StructField::nullable("p", nested_cat("x", ["a"]))])),
+            Some(StructType::new_unchecked([StructField::nullable("p", nested_cat("y", ["b"]))])),
+            None,
+        )),
+        &["p[x|y|-]{x[a|-|-]{a},y[-|b|-]{b}}"],
+    )]
+    fn walker_folds_structs_and_leaves(
+        #[case] table: Vec<StructField>,
+        #[case] delta_stats_schema: Option<StructType>,
+        #[case] expected: &[&str],
+    ) {
+        let table = StructType::new_unchecked(table);
+        let projection = delta_stats_schema
+            .as_ref()
+            .map(|s| CategoryScopes::from_delta_stats_schema(s).unwrap());
+        let rendered = StatsLeafWalker::walk(&table, projection, &TreeRenderer::default()).unwrap();
+        assert_eq!(rendered, expected);
+    }
+
+    #[rstest]
+    #[case::leaf_hook("p.x.a", &["p.x.a"])]
+    #[case::struct_hook("p.x", &["p.x.a", "p.x"])]
+    fn walker_error_stops_later_callbacks(
+        #[case] fail_at: &'static str,
+        #[case] expected_visited: &[&str],
+    ) {
+        let table = StructType::new_unchecked([sibling_structs()]);
+        let renderer = TreeRenderer {
+            fail_at: Some(fail_at),
+            ..Default::default()
+        };
+        let err = StatsLeafWalker::walk(&table, None, &renderer).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains(&format!("injected failure at '{fail_at}'")));
+        assert_eq!(*renderer.visited.borrow(), expected_visited);
+    }
+
+    // == AMT content_stats -> parsed Delta stats ==
+
+    /// Builds a `Scalar::Struct` of `values` typed by `schema` (values in field order).
+    fn struct_scalar(schema: &StructType, values: Vec<Scalar>) -> Scalar {
+        Scalar::Struct(StructData::try_new(schema.fields().cloned().collect(), values).unwrap())
+    }
+
+    /// The single-column `content_stats` leaf struct for `name` in `content_stats_schema`, filled
+    /// with `sub_values` in the leaf's sub-field order (see [`build_stats_struct`]).
+    fn leaf_scalar(
+        content_stats_schema: &StructType,
+        name: &str,
+        sub_values: Vec<Scalar>,
+    ) -> Scalar {
+        struct_scalar(
+            &stats_struct_for_name(name, content_stats_schema),
+            sub_values,
+        )
+    }
+
+    /// Converts an `EngineData` to its backing Arrow `RecordBatch` for comparison.
+    fn to_batch(data: Box<dyn EngineData>) -> RecordBatch {
+        ArrowEngineData::try_from_engine_data(data)
+            .unwrap()
+            .record_batch()
+            .clone()
+    }
+
+    /// Evaluates [`build_parsed_stats_expression`] over `manifest_data`.
+    fn convert_amt_stats_to_delta_stats(
+        engine: &dyn Engine,
+        manifest_data: &dyn EngineData,
+        table_schema: &StructType,
+        delta_stats_schema: &StructType,
+        input_schema: &StructType,
+    ) -> KernelResult<Box<dyn EngineData>> {
+        let (output_schema, expr) =
+            build_parsed_stats_expression(table_schema, delta_stats_schema, input_schema)?;
+        engine
+            .evaluation_handler()
+            .new_expression_evaluator(Arc::new(input_schema.clone()), expr, output_schema.into())?
+            .evaluate(manifest_data)
+    }
+
+    /// Converts a single input row (`content_stats` + `recordCount`) and asserts the produced batch
+    /// equals one built directly from `expected_stats` (the Delta stats struct scalar) and the same
+    /// `record_count`. Uses the real evaluator end to end.
+    fn assert_parsed_stats(
+        table: &StructType,
+        delta: &StructType,
+        content_stats: Scalar,
+        record_count: i64,
+        expected_stats: Scalar,
+    ) {
+        let content_stats_schema = projected_stats_schema(table, delta).expect("projected schema");
+        let input_schema = StructType::new_unchecked([
+            StructField::nullable(CONTENT_STATS_FIELD_NAME, content_stats_schema),
+            StructField::nullable(RECORD_COUNT, DataType::LONG),
+        ]);
+        let engine = SyncEngine::new();
+        let handler = engine.evaluation_handler();
+        let input = handler
+            .create_many(
+                Arc::new(input_schema.clone()),
+                vec![vec![content_stats, Scalar::Long(record_count)]],
+            )
+            .unwrap();
+
+        let (output_schema, _) =
+            build_parsed_stats_expression(table, delta, &input_schema).unwrap();
+        let expected = handler
+            .create_many(
+                output_schema,
+                vec![vec![expected_stats, Scalar::Long(record_count)]],
+            )
+            .unwrap();
+
+        let actual =
+            convert_amt_stats_to_delta_stats(&engine, input.as_ref(), table, delta, &input_schema)
+                .unwrap();
+
+        assert_eq!(to_batch(actual), to_batch(expected));
+    }
+
+    /// A nested Delta stats schema with `numRecords`, the given category sub-structs, and
+    /// `tightBounds`. Mirrors the canonical Delta stats shape for building parsed stats targets.
+    fn delta_stats_with_bounds(
+        null_count: StructType,
+        min_values: StructType,
+        max_values: StructType,
+    ) -> StructType {
+        StructType::new_unchecked([
+            StructField::nullable(NUM_RECORDS, DataType::LONG),
+            StructField::nullable(NULL_COUNT, null_count),
+            StructField::nullable(MIN_VALUES, min_values),
+            StructField::nullable(MAX_VALUES, max_values),
+            StructField::nullable(DELTA_TIGHT_BOUNDS, DataType::BOOLEAN),
+        ])
+    }
+
+    #[test]
+    fn parsed_stats_maps_categories_and_record_count() {
+        let table = StructType::new_unchecked([
+            field_with_id("id", DataType::LONG, true, 0),
+            field_with_id("score", DataType::LONG, true, 1),
+        ]);
+        let delta = delta_stats_with_bounds(
+            stat_cols(["id", "score"]),
+            stat_cols(["id", "score"]),
+            stat_cols(["id", "score"]),
+        );
+        let content_stats_schema = projected_stats_schema(&table, &delta).unwrap();
+        // Leaf sub-field order (LONG, all categories): lower bound, upper bound, tight bounds,
+        // value count, null value count.
+        let content_stats = struct_scalar(
+            &content_stats_schema,
+            vec![
+                leaf_scalar(
+                    &content_stats_schema,
+                    "id",
+                    vec![
+                        Scalar::Long(1),
+                        Scalar::Long(10),
+                        Scalar::Boolean(true),
+                        Scalar::Long(100),
+                        Scalar::Long(5),
+                    ],
+                ),
+                leaf_scalar(
+                    &content_stats_schema,
+                    "score",
+                    vec![
+                        Scalar::Long(20),
+                        Scalar::Long(99),
+                        Scalar::Boolean(true),
+                        Scalar::Long(100),
+                        Scalar::Long(4),
+                    ],
+                ),
+            ],
+        );
+
+        let expected = struct_scalar(
+            &delta,
+            vec![
+                Scalar::Long(100), // numRecords <- recordCount
+                struct_scalar(
+                    &stat_cols(["id", "score"]),
+                    vec![Scalar::Long(5), Scalar::Long(4)],
+                ),
+                struct_scalar(
+                    &stat_cols(["id", "score"]),
+                    vec![Scalar::Long(1), Scalar::Long(20)],
+                ),
+                struct_scalar(
+                    &stat_cols(["id", "score"]),
+                    vec![Scalar::Long(10), Scalar::Long(99)],
+                ),
+                Scalar::Boolean(true), // tightBounds = true AND true
+            ],
+        );
+
+        assert_parsed_stats(&table, &delta, content_stats, 100, expected);
+    }
+
+    #[test]
+    fn parsed_stats_nested_leaf_rebuilds_nested_path() {
+        // Table a:{b: long}; the flat content_stats leaf is keyed by the dotted path "a.b".
+        let table = StructType::new_unchecked([struct_field_with_id(
+            "a",
+            9,
+            [field_with_id("b", DataType::LONG, true, 0)],
+        )]);
+        let delta = delta_stats_with_bounds(
+            nested_cat("a", ["b"]),
+            nested_cat("a", ["b"]),
+            nested_cat("a", ["b"]),
+        );
+        let content_stats_schema = projected_stats_schema(&table, &delta).unwrap();
+        let content_stats = struct_scalar(
+            &content_stats_schema,
+            vec![leaf_scalar(
+                &content_stats_schema,
+                "a.b",
+                vec![
+                    Scalar::Long(3),
+                    Scalar::Long(7),
+                    Scalar::Boolean(true),
+                    Scalar::Long(50),
+                    Scalar::Long(2),
+                ],
+            )],
+        );
+
+        let nested = |v: Scalar| {
+            struct_scalar(
+                &nested_cat("a", ["b"]),
+                vec![struct_scalar(&stat_cols(["b"]), vec![v])],
+            )
+        };
+        let expected = struct_scalar(
+            &delta,
+            vec![
+                Scalar::Long(50),
+                nested(Scalar::Long(2)),
+                nested(Scalar::Long(3)),
+                nested(Scalar::Long(7)),
+                Scalar::Boolean(true),
+            ],
+        );
+
+        assert_parsed_stats(&table, &delta, content_stats, 50, expected);
+    }
+
+    #[test]
+    fn parsed_stats_array_in_null_count_reconstructs_null_long() {
+        // Delta records nullCount (but no bounds) for array columns. AMT keeps no content_stats
+        // entry for the array itself, so the conversion emits a null LONG there, which also keeps
+        // the nullCount struct field count aligned.
+        let table = StructType::new_unchecked([
+            field_with_id("id", DataType::LONG, true, 0),
+            field_with_id(
+                "arr",
+                DataType::from(ArrayType::new(DataType::LONG, true)),
+                true,
+                1,
+            ),
+        ]);
+        let delta = delta_stats_with_bounds(
+            stat_cols(["id", "arr"]), // nullCount includes the array
+            stat_cols(["id"]),        // min/max exclude it
+            stat_cols(["id"]),
+        );
+        let content_stats_schema = projected_stats_schema(&table, &delta).unwrap();
+        // Only "id" has a content_stats entry; "arr" is dropped.
+        let content_stats = struct_scalar(
+            &content_stats_schema,
+            vec![leaf_scalar(
+                &content_stats_schema,
+                "id",
+                vec![
+                    Scalar::Long(2),
+                    Scalar::Long(9),
+                    Scalar::Boolean(true),
+                    Scalar::Long(10),
+                    Scalar::Long(1),
+                ],
+            )],
+        );
+
+        let expected = struct_scalar(
+            &delta,
+            vec![
+                Scalar::Long(10),
+                struct_scalar(
+                    &stat_cols(["id", "arr"]),
+                    vec![Scalar::Long(1), Scalar::Null(DataType::LONG)],
+                ),
+                struct_scalar(&stat_cols(["id"]), vec![Scalar::Long(2)]),
+                struct_scalar(&stat_cols(["id"]), vec![Scalar::Long(9)]),
+                Scalar::Boolean(true),
+            ],
+        );
+
+        assert_parsed_stats(&table, &delta, content_stats, 10, expected);
+    }
+
+    /// `name` is a STRING column whose Delta bounds are never tight, so its always-false
+    /// `tight_bounds` is excluded and `tightBounds` follows `id` and `score` alone.
+    #[rstest]
+    #[case::all_tight(true, true, true)]
+    #[case::one_loose(true, false, false)]
+    #[case::both_loose(false, false, false)]
+    fn parsed_stats_tight_bounds_is_and_of_columns(
+        #[case] id_tight: bool,
+        #[case] score_tight: bool,
+        #[case] expected_tight: bool,
+    ) {
+        let table = StructType::new_unchecked([
+            field_with_id("id", DataType::LONG, true, 0),
+            field_with_id("score", DataType::LONG, true, 1),
+            field_with_id("name", DataType::STRING, true, 2),
+        ]);
+        let null_cols = stat_cols(["id", "score", "name"]);
+        let bound_cols = StructType::new_unchecked([
+            StructField::nullable("id", DataType::LONG),
+            StructField::nullable("score", DataType::LONG),
+            StructField::nullable("name", DataType::STRING),
+        ]);
+        let delta =
+            delta_stats_with_bounds(null_cols.clone(), bound_cols.clone(), bound_cols.clone());
+        let content_stats_schema = projected_stats_schema(&table, &delta).unwrap();
+        let long_leaf = |name, min, max, tight, nulls| {
+            leaf_scalar(
+                &content_stats_schema,
+                name,
+                vec![
+                    Scalar::Long(min),
+                    Scalar::Long(max),
+                    Scalar::Boolean(tight),
+                    Scalar::Long(3),
+                    Scalar::Long(nulls),
+                ],
+            )
+        };
+        let content_stats = struct_scalar(
+            &content_stats_schema,
+            vec![
+                long_leaf("id", 1, 2, id_tight, 1),
+                long_leaf("score", 4, 5, score_tight, 2),
+                leaf_scalar(
+                    &content_stats_schema,
+                    "name",
+                    vec![
+                        Scalar::String("a".into()),
+                        Scalar::String("z".into()),
+                        Scalar::Boolean(false),
+                        Scalar::Long(3),
+                        Scalar::Long(3),
+                    ],
+                ),
+            ],
+        );
+
+        let expected = struct_scalar(
+            &delta,
+            vec![
+                Scalar::Long(3),
+                struct_scalar(
+                    &null_cols,
+                    vec![Scalar::Long(1), Scalar::Long(2), Scalar::Long(3)],
+                ),
+                struct_scalar(
+                    &bound_cols,
+                    vec![Scalar::Long(1), Scalar::Long(4), Scalar::String("a".into())],
+                ),
+                struct_scalar(
+                    &bound_cols,
+                    vec![Scalar::Long(2), Scalar::Long(5), Scalar::String("z".into())],
+                ),
+                Scalar::Boolean(expected_tight),
+            ],
+        );
+
+        assert_parsed_stats(&table, &delta, content_stats, 3, expected);
+    }
+
+    #[test]
+    fn parsed_stats_struct_only_in_null_count_is_omitted_from_bounds() {
+        // Boolean is not min/max eligible, so struct `a` appears in nullCount but in neither bound
+        // category, which must not gain an entry for it.
+        let table = StructType::new_unchecked([
+            field_with_id("id", DataType::LONG, true, 0),
+            struct_field_with_id("a", 9, [field_with_id("b", DataType::BOOLEAN, true, 1)]),
+        ]);
+        let null_cols = StructType::new_unchecked([
+            StructField::nullable("id", DataType::LONG),
+            StructField::nullable("a", stat_cols(["b"])),
+        ]);
+        let delta =
+            delta_stats_with_bounds(null_cols.clone(), stat_cols(["id"]), stat_cols(["id"]));
+        let content_stats_schema = projected_stats_schema(&table, &delta).unwrap();
+        // "a.b" is only in nullCount, so it keeps just value count and null value count.
+        let content_stats = struct_scalar(
+            &content_stats_schema,
+            vec![
+                leaf_scalar(
+                    &content_stats_schema,
+                    "id",
+                    vec![
+                        Scalar::Long(1),
+                        Scalar::Long(9),
+                        Scalar::Boolean(false),
+                        Scalar::Long(10),
+                        Scalar::Long(2),
+                    ],
+                ),
+                leaf_scalar(
+                    &content_stats_schema,
+                    "a.b",
+                    vec![Scalar::Long(10), Scalar::Long(3)],
+                ),
+            ],
+        );
+
+        let expected = struct_scalar(
+            &delta,
+            vec![
+                Scalar::Long(10),
+                struct_scalar(
+                    &null_cols,
+                    vec![
+                        Scalar::Long(2),
+                        struct_scalar(&stat_cols(["b"]), vec![Scalar::Long(3)]),
+                    ],
+                ),
+                struct_scalar(&stat_cols(["id"]), vec![Scalar::Long(1)]),
+                struct_scalar(&stat_cols(["id"]), vec![Scalar::Long(9)]),
+                Scalar::Boolean(false), // tightBounds follows `id` alone
+            ],
+        );
+
+        assert_parsed_stats(&table, &delta, content_stats, 10, expected);
+    }
+
+    #[test]
+    fn parsed_stats_projected_schema_emits_only_present_categories() {
+        // A Delta stats schema carrying only numRecords + nullCount: the output has exactly those
+        // two fields, and tightBounds is not emitted.
+        let table = StructType::new_unchecked([field_with_id("id", DataType::LONG, true, 0)]);
+        let delta = StructType::new_unchecked([
+            StructField::nullable(NUM_RECORDS, DataType::LONG),
+            StructField::nullable(NULL_COUNT, stat_cols(["id"])),
+        ]);
+        let content_stats_schema = projected_stats_schema(&table, &delta).unwrap();
+        // A leaf only in nullCount keeps value count and null value count (order per
+        // build_stats_struct).
+        let content_stats = struct_scalar(
+            &content_stats_schema,
+            vec![leaf_scalar(
+                &content_stats_schema,
+                "id",
+                vec![Scalar::Long(7), Scalar::Long(2)],
+            )],
+        );
+        let expected = struct_scalar(
+            &delta,
+            vec![
+                Scalar::Long(7),
+                struct_scalar(&stat_cols(["id"]), vec![Scalar::Long(2)]),
+            ],
+        );
+
+        assert_parsed_stats(&table, &delta, content_stats, 7, expected);
+    }
+
+    #[test]
+    fn parsed_stats_variant_null_count_only() {
+        // Variants carry stats only in nullCount today, with no tight_bounds sub-field. The leaf's
+        // projected content_stats struct is just value count and null value count.
+        let table = StructType::new_unchecked([field_with_id(
+            "v",
+            DataType::unshredded_variant(),
+            true,
+            0,
+        )]);
+        let delta = StructType::new_unchecked([
+            StructField::nullable(NUM_RECORDS, DataType::LONG),
+            StructField::nullable(NULL_COUNT, stat_cols(["v"])),
+        ]);
+        let content_stats_schema = projected_stats_schema(&table, &delta).unwrap();
+        let content_stats = struct_scalar(
+            &content_stats_schema,
+            vec![leaf_scalar(
+                &content_stats_schema,
+                "v",
+                vec![Scalar::Long(8), Scalar::Long(3)],
+            )],
+        );
+        let expected = struct_scalar(
+            &delta,
+            vec![
+                Scalar::Long(8),
+                struct_scalar(&stat_cols(["v"]), vec![Scalar::Long(3)]),
+            ],
+        );
+
+        assert_parsed_stats(&table, &delta, content_stats, 8, expected);
+    }
+
+    /// `content_stats_col` names the input's stats column; `with_record_count` controls whether
+    /// the input schema carries the required [`RECORD_COUNT`] column.
+    #[rstest]
+    #[case::content_stats_missing("other_stats", true, "must be a struct")]
+    #[case::record_count_missing(CONTENT_STATS_FIELD_NAME, false, "not found")]
+    fn parsed_stats_errors_on_bad_columns(
+        #[case] content_stats_col: &str,
+        #[case] with_record_count: bool,
+        #[case] needle: &str,
+    ) {
+        let table = StructType::new_unchecked([field_with_id("id", DataType::LONG, true, 0)]);
+        let delta =
+            delta_stats_with_bounds(stat_cols(["id"]), stat_cols(["id"]), stat_cols(["id"]));
+        let content_stats_schema = projected_stats_schema(&table, &delta).unwrap();
+        let mut fields = vec![StructField::nullable(
+            content_stats_col,
+            content_stats_schema,
+        )];
+        if with_record_count {
+            fields.push(StructField::nullable(RECORD_COUNT, DataType::LONG));
+        }
+        let input_schema = StructType::new_unchecked(fields);
+
+        assert_result_error_with_message(
+            build_parsed_stats_expression(&table, &delta, &input_schema),
+            needle,
+        );
+    }
+
+    #[test]
+    fn parsed_stats_errors_when_category_order_differs_from_table() {
+        let table = StructType::new_unchecked([
+            field_with_id("id", DataType::LONG, true, 0),
+            field_with_id("score", DataType::LONG, true, 1),
+        ]);
+        let delta = delta_stats_with_bounds(
+            stat_cols(["score", "id"]),
+            stat_cols(["id", "score"]),
+            stat_cols(["id", "score"]),
+        );
+        let input_schema = StructType::new_unchecked([
+            StructField::nullable(
+                CONTENT_STATS_FIELD_NAME,
+                projected_stats_schema(&table, &delta).unwrap(),
+            ),
+            StructField::nullable(RECORD_COUNT, DataType::LONG),
+        ]);
+
+        assert_result_error_with_message(
+            build_parsed_stats_expression(&table, &delta, &input_schema),
+            "but the table walk produced",
+        );
     }
 }
