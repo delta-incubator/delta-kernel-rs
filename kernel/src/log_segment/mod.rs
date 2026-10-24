@@ -1767,8 +1767,7 @@ fn require_pointed_checkpoint_action(
     pointer: &LastManifestCommit,
     action: Option<CheckpointAction>,
 ) -> KernelResult<CheckpointAction> {
-    let action = action
-        .ok_or_else(|| inconsistent_pointer(pointer, "that commit carries no checkpoint action"))?;
+    let action = action.ok_or_else(|| missing_checkpoint_action(pointer))?;
     require!(
         action.content_root_version() == pointer.content_root_version,
         inconsistent_pointer(
@@ -1780,6 +1779,12 @@ fn require_pointed_checkpoint_action(
         )
     );
     Ok(action)
+}
+
+/// The error for a manifest commit `pointer` names that carries no checkpoint action.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+fn missing_checkpoint_action(pointer: &LastManifestCommit) -> KernelError {
+    inconsistent_pointer(pointer, "that commit carries no checkpoint action")
 }
 
 /// The error for a `pointer` that the log contradicts, as explained by `detail`.
