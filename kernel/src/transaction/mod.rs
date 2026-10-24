@@ -1611,19 +1611,19 @@ impl<STATE> Transaction<STATE, Imperative> {
         self.validate_add_files_stats(&self.staged_data_changes.add_files_metadata)?;
 
         // Validate required fields for addFile.
-        write_validation::StagedDataValidator::staged_add_file(
+        write_validation::StagedDataValidator::for_add_files(
             self.effective_table_config.physical_partition_columns(),
         )
-        .validate(&self.staged_data_changes.add_files_metadata)?;
+        .validate_batches(&self.staged_data_changes.add_files_metadata)?;
 
-        write_validation::StagedDataValidator::staged_dv_matched_file(
+        write_validation::StagedDataValidator::for_dv_updates(
             self.effective_table_config.physical_partition_columns(),
         )?
-        .validate_filtered(&self.staged_data_changes.dv_matched_files)?;
+        .validate_selected_rows(&self.staged_data_changes.dv_matched_files)?;
 
         // Validate required fields for RemoveFile.
-        write_validation::StagedDataValidator::staged_remove_file()
-            .validate_filtered(&self.staged_data_changes.remove_files_metadata)?;
+        write_validation::StagedDataValidator::for_remove_files()
+            .validate_selected_rows(&self.staged_data_changes.remove_files_metadata)?;
 
         Ok(())
     }
