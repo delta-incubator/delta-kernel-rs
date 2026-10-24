@@ -187,7 +187,7 @@ mod tests {
         fn commit(
             &self,
             _engine: &dyn delta_kernel::Engine,
-            _actions: delta_kernel::KernelResultIterator<'_, FilteredEngineData>,
+            _actions: Box<dyn delta_kernel::KernelResultIterator<FilteredEngineData> + '_>,
             _commit_metadata: delta_kernel::committer::CommitMetadata,
         ) -> KernelResult<delta_kernel::committer::CommitResponse> {
             Err(delta_kernel::KernelError::IOError(std::io::Error::other(
@@ -220,7 +220,7 @@ mod tests {
         fn commit(
             &self,
             _engine: &dyn delta_kernel::Engine,
-            _actions: delta_kernel::KernelResultIterator<'_, FilteredEngineData>,
+            _actions: Box<dyn delta_kernel::KernelResultIterator<FilteredEngineData> + '_>,
             _commit_metadata: delta_kernel::committer::CommitMetadata,
         ) -> KernelResult<delta_kernel::committer::CommitResponse> {
             Err(delta_kernel::KernelError::generic(
