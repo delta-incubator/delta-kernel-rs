@@ -1,3 +1,5 @@
+// Prints the commit files of a commit range through the FFI commit-file iterator.
+
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>

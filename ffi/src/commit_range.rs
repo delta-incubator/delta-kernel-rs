@@ -148,7 +148,8 @@ pub unsafe extern "C" fn commit_range_builder_with_max_catalog_version(
     builder.into()
 }
 
-/// Enable or disable build-time commit range validation. Defaults to `true`.
+/// Enable or disable build-time commit range validation. This is by default `true` when you
+/// construct a builder.
 ///
 /// When `false`, [`commit_range_builder_build`] lists the available commits without validating the
 /// start version or contiguity; [`commit_range_commit_files_next`] then reports gaps lazily
@@ -170,7 +171,8 @@ pub unsafe extern "C" fn commit_range_builder_with_commit_range_validation(
     builder.into()
 }
 
-/// Set whether [`commit_range_commit_files_next`] fails on missing versions. Defaults to `true`.
+/// Set whether [`commit_range_commit_files_next`] fails on missing versions. This is by default
+/// `true` when you construct a builder.
 ///
 /// When `true`, a missing start version or any gap through the range's end version, including one
 /// after the last listed file, surfaces as an error when the commit-files iterator reaches it.
