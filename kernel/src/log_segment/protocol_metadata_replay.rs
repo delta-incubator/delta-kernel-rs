@@ -105,7 +105,8 @@ impl LogSegment {
             // The pruned replay only reads commits after the CRC version, but a hit there is still
             // the latest action: any action at or below the CRC is older.
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            let (captured_checkpoint_action, last_manifest_commit) = candidate.amt_resolutions();
+            let (captured_checkpoint_action, last_manifest_commit) =
+                candidate.amt_resolutions(pruned.newest_commit().is_some());
 
             if metadata_opt.is_some() && protocol_opt.is_some() {
                 info!("Found P&M from pruned log replay");
@@ -148,7 +149,8 @@ impl LogSegment {
             bound,
         )?;
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        let (captured_checkpoint_action, last_manifest_commit) = candidate.amt_resolutions();
+        let (captured_checkpoint_action, last_manifest_commit) =
+            candidate.amt_resolutions(self.newest_commit().is_some());
         Ok(PmResolution {
             metadata: candidate.metadata.map(|(_, m)| m),
             protocol: candidate.protocol.map(|(_, p)| p),
@@ -664,12 +666,17 @@ pub(crate) enum LastManifestCommitResolution {
 
 #[cfg(feature = "adaptive-metadata-in-dev")]
 impl LastManifestCommitResolution {
-    /// Resolves the `lastManifestCommit` that P&M replay read from the newest commit. A miss is
-    /// `Unresolved` because replay may not have read that commit (e.g. the segment ends on a
-    /// checkpoint).
-    fn from_replay(captured: Option<LastManifestCommit>) -> Self {
+    /// Resolves the `lastManifestCommit` that P&M replay captured from the snapshot version's
+    /// commit.
+    ///
+    /// `newest_commit_listed` says whether the segment lists that commit file. Replay always reads
+    /// a listed newest commit, so if it is listed, a missing `captured` pointer resolves to
+    /// `Resolved(None)`. Otherwise it is `Unresolved` and is read from the commit file on first
+    /// use.
+    fn from_replay(captured: Option<LastManifestCommit>, newest_commit_listed: bool) -> Self {
         match captured {
             Some(pointer) => Self::Resolved(Some(pointer)),
+            None if newest_commit_listed => Self::Resolved(None),
             None => Self::Unresolved,
         }
     }
@@ -741,13 +748,18 @@ impl PmCandidate {
     }
 
     /// The AMT checkpoint action replay captured, if any, and how it resolved `lastManifestCommit`,
-    /// for the snapshot.
+    /// for the snapshot. `newest_commit_listed` says whether the replayed segment lists its newest
+    /// commit.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    fn amt_resolutions(&self) -> (Option<Arc<CheckpointAction>>, LastManifestCommitResolution) {
+    fn amt_resolutions(
+        &self,
+        newest_commit_listed: bool,
+    ) -> (Option<Arc<CheckpointAction>>, LastManifestCommitResolution) {
         (
             self.checkpoint.as_ref().map(|(_, c)| Arc::new(c.clone())),
             LastManifestCommitResolution::from_replay(
                 self.last_manifest_commit.as_ref().map(|(_, p)| p.clone()),
+                newest_commit_listed,
             ),
         )
     }
