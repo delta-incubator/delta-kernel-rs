@@ -33,17 +33,17 @@ use crate::path::{LogRoot, ParsedLogPath};
 use crate::row_tracking::{RowTrackingDomainMetadata, RowTrackingVisitor};
 use crate::scan::data_skipping::stats_schema::schema_with_all_fields_nullable;
 use crate::scan::log_replay::{
-    BASE_ROW_ID_NAME, DEFAULT_ROW_COMMIT_VERSION_NAME, FILE_CONSTANT_VALUES_NAME,
-    PARTITION_VALUES_NAME, PARTITION_VALUES_PARSED_NAME, SIZE_NAME, STATS_NAME, STATS_PARSED_NAME,
-    TAGS_NAME,
+    BASE_ROW_ID_NAME, CLUSTERING_PROVIDER_NAME, DEFAULT_ROW_COMMIT_VERSION_NAME,
+    FILE_CONSTANT_VALUES_NAME, PARTITION_VALUES_NAME, PARTITION_VALUES_PARSED_NAME, SIZE_NAME,
+    STATS_NAME, STATS_PARSED_NAME, TAGS_NAME,
 };
 use crate::scan::scan_row_schema;
 use crate::schema::void_utils::validate_schema_for_write;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::schema::ToSchema;
 use crate::schema::{
-    lazy_schema_ref, schema_ref, ArrayType, ColumnDefault, SchemaRef, SchemaStructPatchBuilder,
-    StructField, StructType,
+    lazy_schema_ref, schema_ref, ArrayType, ColumnDefault, MapType, SchemaRef,
+    SchemaStructPatchBuilder, StructField, StructType,
 };
 use crate::snapshot::{Snapshot, SnapshotRef};
 use crate::struct_patch::ProjectionStructPatchBuilder;
@@ -168,6 +168,41 @@ pub(crate) static BASE_ADD_FILES_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! 
     },
 };
 
+// The optional per-file add-files columns. Each has the type of the Add action field of the same
+// name and is copied into each Add action unchanged.
+static ADD_FILE_TAGS_FIELD: LazyLock<StructField> = LazyLock::new(|| {
+    StructField::nullable(
+        TAGS_NAME,
+        MapType::new(DataType::STRING, DataType::STRING, true),
+    )
+});
+static ADD_FILE_CLUSTERING_PROVIDER_FIELD: LazyLock<StructField> =
+    LazyLock::new(|| StructField::nullable(CLUSTERING_PROVIDER_NAME, DataType::STRING));
+
+static TAGS_ADD_FILES_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+    ..(BASE_ADD_FILES_SCHEMA.fields().cloned()),
+    (&ADD_FILE_TAGS_FIELD),
+};
+static CLUSTERING_PROVIDER_ADD_FILES_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+    ..(BASE_ADD_FILES_SCHEMA.fields().cloned()),
+    (&ADD_FILE_CLUSTERING_PROVIDER_FIELD),
+};
+static TAGS_AND_CLUSTERING_PROVIDER_ADD_FILES_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+    ..(BASE_ADD_FILES_SCHEMA.fields().cloned()),
+    (&ADD_FILE_TAGS_FIELD),
+    (&ADD_FILE_CLUSTERING_PROVIDER_FIELD),
+};
+
+/// The add-files schema with the optional `tags` and `clusteringProvider` columns that are enabled.
+fn add_files_schema_with(tags: bool, clustering_provider: bool) -> &'static SchemaRef {
+    match (tags, clustering_provider) {
+        (false, false) => &BASE_ADD_FILES_SCHEMA,
+        (true, false) => &TAGS_ADD_FILES_SCHEMA,
+        (false, true) => &CLUSTERING_PROVIDER_ADD_FILES_SCHEMA,
+        (true, true) => &TAGS_AND_CLUSTERING_PROVIDER_ADD_FILES_SCHEMA,
+    }
+}
+
 static DATA_CHANGE_COLUMN: LazyLock<StructField> =
     LazyLock::new(|| StructField::not_null("dataChange", DataType::BOOLEAN));
 
@@ -186,6 +221,7 @@ fn with_row_tracking_cols(schema: &SchemaRef) -> KernelResult<SchemaRef> {
 
 /// The row-tracking-augmented add-file write-metadata schema: [`BASE_ADD_FILES_SCHEMA`] extended
 /// with the row-tracking columns.
+#[cfg(feature = "adaptive-metadata-in-dev")]
 pub(crate) fn augmented_write_metadata_schema() -> KernelResult<SchemaRef> {
     with_row_tracking_cols(&BASE_ADD_FILES_SCHEMA)
 }
@@ -337,6 +373,10 @@ pub struct Transaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     // enabled. Used for determining which columns require statistics collection. Expected to be
     // physical column names.
     physical_clustering_columns: Option<Vec<ColumnName>>,
+    // Whether `add_files_schema` includes the per-file `tags` column.
+    add_file_tags: bool,
+    // Whether `add_files_schema` includes the per-file `clusteringProvider` column.
+    add_file_clustering_provider: bool,
     // PhantomType marker for transaction state (UpdateTable or CreateTable).
     // Zero-sized; only affects the type system.
     _state: PhantomType<STATE>,
@@ -633,14 +673,18 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     /// data schema and table configuration. See [`stats_schema`] for the table-specific expected
     /// stats schema.
     ///
-    /// Note: While currently static, in the future the schema might change depending on
-    /// options set on the transaction or features enabled on the table.
+    /// The schema depends on options set on the [`TransactionBuilder`], and is fixed for the
+    /// lifetime of the transaction. [`with_add_file_tags`] and
+    /// [`with_add_file_clustering_provider`] each append one nullable column after the base
+    /// columns, always in the order `tags`, then `clusteringProvider`.
     ///
     /// [`add_files`]: crate::transaction::Transaction::add_files
     /// [`ParquetHandler`]: crate::ParquetHandler
     /// [`stats_schema`]: Transaction::stats_schema
+    /// [`with_add_file_tags`]: TransactionBuilder::with_add_file_tags
+    /// [`with_add_file_clustering_provider`]: TransactionBuilder::with_add_file_clustering_provider
     pub fn add_files_schema(&self) -> &'static SchemaRef {
-        &BASE_ADD_FILES_SCHEMA
+        add_files_schema_with(self.add_file_tags, self.add_file_clustering_provider)
     }
 }
 
@@ -805,8 +849,6 @@ impl<STATE> Transaction<STATE, Imperative> {
     /// to add multiple batches.
     ///
     /// The expected schema for `add_metadata` is given by [`Transaction::add_files_schema`].
-    ///
-    /// TODO(#3553): Support writing clusteringProvider to AddFile actions.
     pub fn add_files(&mut self, add_metadata: Box<dyn EngineData>) {
         self.staged_data_changes
             .add_files_metadata
@@ -893,6 +935,8 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             #[cfg(feature = "adaptive-metadata-in-dev")]
             manifest_write: None,
             physical_clustering_columns: None,
+            add_file_tags: common_state.add_file_tags,
+            add_file_clustering_provider: common_state.add_file_clustering_provider,
             _state: PhantomType::default(),
         }
     }
@@ -1918,7 +1962,7 @@ impl<STATE> Transaction<STATE, Imperative> {
         let add_actions = build_add_actions(
             engine,
             extended_add_files,
-            augmented_write_metadata_schema()?,
+            with_row_tracking_cols(self.add_files_schema())?,
             self.data_change,
         )?;
 
@@ -2274,7 +2318,7 @@ mod tests {
     use super::exec_mode::StagedDataChanges;
     use super::*;
     use crate::actions::deletion_vector::DeletionVectorDescriptor;
-    use crate::actions::CommitInfo;
+    use crate::actions::{CommitInfo, ADD_SCHEMA};
     use crate::arrow::array::builder::{MapBuilder, MapFieldNames, StringBuilder};
     use crate::arrow::array::{
         new_null_array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, NullArray,
@@ -2372,6 +2416,8 @@ mod tests {
             #[cfg(feature = "adaptive-metadata-in-dev")]
             manifest_write,
             physical_clustering_columns,
+            add_file_tags,
+            add_file_clustering_provider,
             _state: _,
         } = transaction;
 
@@ -2407,6 +2453,8 @@ mod tests {
         #[cfg(feature = "adaptive-metadata-in-dev")]
         assert!(manifest_write.is_none());
         assert!(physical_clustering_columns.is_none());
+        assert!(!add_file_tags);
+        assert!(!add_file_clustering_provider);
         Ok(())
     }
 
@@ -2455,6 +2503,8 @@ mod tests {
                 transaction_ids: vec![("app-one".into(), 7), ("app-two".into(), 8)],
                 domain_metadata_additions: expected_domains.clone(),
                 data_change: false,
+                add_file_tags: true,
+                add_file_clustering_provider: true,
             },
             snapshot.table_configuration().clone(),
             Box::new(MockCatalogCommitter),
@@ -2485,6 +2535,8 @@ mod tests {
         assert!(std::ptr::eq(expected_commit_info, commit_info.as_ref()));
         assert_eq!(commit_info_schema, expected_commit_info_schema);
         assert!(!transaction.data_change);
+        assert!(transaction.add_file_tags);
+        assert!(transaction.add_file_clustering_provider);
         Ok(())
     }
 
@@ -2657,22 +2709,28 @@ mod tests {
     }
 
     // TODO: create a finer-grained unit tests for transactions (issue#1091)
-    #[test]
-    fn test_add_files_schema() -> KernelResult<()> {
-        let engine = SyncEngine::new();
-        let path =
-            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
-        let url = url::Url::from_directory_path(path).unwrap();
-        let snapshot = Snapshot::builder_for(url)
-            .at_version(1)
-            .build(&engine)
-            .unwrap();
-        let txn = snapshot
-            .update_table(UpdateTableOperation::Write, "default engine", true)
-            .build(&engine, Box::new(FileSystemCommitter::new()))?;
+    #[rstest]
+    fn test_add_files_schema(
+        #[values(false, true)] tags: bool,
+        #[values(false, true)] clustering_provider: bool,
+    ) -> KernelResult<()> {
+        let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
+        let mut builder = create_table(
+            "memory:///t",
+            schema_ref! { nullable "id": INTEGER },
+            "test",
+            true,
+        )
+        .with_data_layout(DataLayout::clustered(["id"]));
+        if tags {
+            builder = builder.with_add_file_tags();
+        }
+        if clustering_provider {
+            builder = builder.with_add_file_clustering_provider();
+        }
+        let txn = builder.build(&engine, Box::new(FileSystemCommitter::new()))?;
 
-        let schema = txn.add_files_schema();
-        let expected = schema! {
+        let base = schema! {
             not_null "path": STRING,
             not_null "partitionValues": { STRING => nullable STRING },
             not_null "size": LONG,
@@ -2685,48 +2743,68 @@ mod tests {
                 nullable TIGHT_BOUNDS: BOOLEAN,
             },
         };
-        assert_eq!(*schema, expected.into());
+        let mut expected: Vec<_> = base.fields().cloned().collect();
+        if tags {
+            let tags_type = MapType::new(DataType::STRING, DataType::STRING, true);
+            expected.push(StructField::nullable("tags", tags_type));
+        }
+        if clustering_provider {
+            expected.push(StructField::nullable(
+                "clusteringProvider",
+                DataType::STRING,
+            ));
+        }
+        // Each optional column has the type of the Add action field it is copied into.
+        for field in &expected[base.num_fields()..] {
+            assert_eq!(Some(field), ADD_SCHEMA.field(field.name()));
+        }
+        assert_eq!(
+            txn.add_files_schema().as_ref(),
+            &StructType::try_new(expected)?
+        );
         Ok(())
     }
 
     #[rstest]
-    #[case::base(false)]
-    #[case::row_tracking(true)]
-    fn test_add_action_projection_schema(#[case] row_tracking: bool) -> KernelResult<()> {
+    fn test_add_action_projection_schema(
+        #[values(false, true)] row_tracking: bool,
+        #[values(false, true)] tags: bool,
+        #[values(false, true)] clustering_provider: bool,
+    ) -> KernelResult<()> {
+        let add_files_schema = add_files_schema_with(tags, clustering_provider);
         let input_schema = if row_tracking {
-            with_row_tracking_cols(&BASE_ADD_FILES_SCHEMA)?
+            with_row_tracking_cols(add_files_schema)?
         } else {
-            BASE_ADD_FILES_SCHEMA.clone()
+            add_files_schema.clone()
         };
         let (schema, _) = build_add_action_projection(input_schema.as_ref(), true)?;
         let field_names: Vec<_> = schema.fields().map(|f| f.name().as_str()).collect();
-        let expected_field_names = if row_tracking {
-            vec![
-                "path",
-                "partitionValues",
-                "size",
-                "modificationTime",
-                "dataChange",
-                "stats",
-                "baseRowId",
-                "defaultRowCommitVersion",
-            ]
-        } else {
-            vec![
-                "path",
-                "partitionValues",
-                "size",
-                "modificationTime",
-                "dataChange",
-                "stats",
-            ]
-        };
+        let mut expected_field_names = vec![
+            "path",
+            "partitionValues",
+            "size",
+            "modificationTime",
+            "dataChange",
+            "stats",
+        ];
+        if tags {
+            expected_field_names.push("tags");
+        }
+        if clustering_provider {
+            expected_field_names.push("clusteringProvider");
+        }
+        if row_tracking {
+            expected_field_names.extend(["baseRowId", "defaultRowCommitVersion"]);
+        }
         assert_eq!(field_names, expected_field_names);
         assert_eq!(schema.field("dataChange"), Some(&*DATA_CHANGE_COLUMN));
         assert_eq!(
             schema.field("stats").unwrap().data_type(),
             &DataType::STRING
         );
+        for name in [TAGS_NAME, CLUSTERING_PROVIDER_NAME] {
+            assert_eq!(schema.field(name), input_schema.field(name));
+        }
         Ok(())
     }
 
