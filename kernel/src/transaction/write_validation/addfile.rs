@@ -42,7 +42,8 @@ impl StagedDataValidator {
 /// Optional fields: `stats`, `tags`, `deletionVector`, `baseRowId`,
 /// `defaultRowCommitVersion`, and `clusteringProvider`.
 ///
-/// NOTE: Currently, Kernel doesn't require connectors to set dataChange for staged addFile.
+/// Kernel guarantees `dataChange` exists by lazily appending it to AddFile actions, so we don't
+/// validate its presence here.
 /// TODO(2869): Add intent-based validation for dataChange.
 struct MandatoryAddFileValidation {
     physical_partition_columns: HashSet<String>,
