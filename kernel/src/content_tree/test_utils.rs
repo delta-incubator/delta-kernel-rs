@@ -6,12 +6,23 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::content_tree::{
-    ContentTreeNodeEntry, DataContentType, DataFileFormat, ManifestInfo, TrackingInfo,
-    TrackingStatus, AMT_FORMAT_VERSION,
+    ContentTreeNodeEntry, DataContentType, DataFileFormat, DeletionVectorInfo, ManifestInfo,
+    TrackingInfo, TrackingStatus, AMT_FORMAT_VERSION,
 };
 use crate::expressions::{Scalar, StructData};
 use crate::schema::ToSchema as _;
 use crate::{Engine, EngineData, FileMeta};
+
+/// A valid relative AMT deletion vector, convertible to a `DeletionVectorDescriptor`.
+pub(crate) fn test_dv_info() -> DeletionVectorInfo {
+    DeletionVectorInfo {
+        location: "dv.bin".to_string(),
+        offset: 1,
+        size_in_bytes: 48,
+        cardinality: 6,
+        key_metadata: None,
+    }
+}
 
 /// A minimal-root `Data`/`Added` entry with the given path, size, and row-tracking numbers.
 pub(crate) fn added_data_entry(
